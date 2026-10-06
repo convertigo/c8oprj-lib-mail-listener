@@ -1,0 +1,46 @@
+databaseName: maillistener
+↓get_document [transactions.couchdb.GetDocumentTransaction]: 
+  ↓_use_docid [variables.RequestableVariable-1791302852607]: 
+    description: Document id
+↓get_view [transactions.couchdb.GetViewTransaction]: 
+  ↓_use_ddoc [variables.RequestableVariable-1791302852624]: 
+    description: Design document name
+  ↓_use_view [variables.RequestableVariable-1791302852657]: 
+    description: View function name
+  ↓_use_include_docs [variables.RequestableVariable-1791302852690]: 
+    description: Include documents in rows
+  ↓_use_key [variables.RequestableVariable-1791302852747]: 
+    description: Filter by key
+  ↓_use_startkey [variables.RequestableVariable-1791302852769]: 
+    description: Start key (JSON)
+  ↓_use_endkey [variables.RequestableVariable-1791302852786]: 
+    description: End key (JSON)
+↓post_document [transactions.couchdb.PostDocumentTransaction]: 
+  ↓_id [variables.RequestableVariable-1791302884319]: 
+    description: Document id (mail-<imapUID> or state-inbox)
+  ↓_use_json_base [variables.RequestableVariable-1791302884335]: 
+    description: JSON used as a base for the document
+↓put_attachment [transactions.couchdb.PutDocumentAttachmentTransaction]: 
+↓update_document [transactions.couchdb.PostDocumentTransaction]: 
+  comment: Updates an existing document by merging the posted fields (state-inbox cursor, mail status). post_document keeps policy none so creating an existing mail-<uid> stays a 409 (dedup).
+  policy: merge
+  ↓_id [variables.RequestableVariable-1791305813265]: 
+    description: Document id (mail-<imapUID> or state-inbox)
+  ↓_use_json_base [variables.RequestableVariable-1791305813267]: 
+    description: JSON fields merged into the document
+↓listener [couchdb.DesignDocument]: 
+  docdata: 
+    →: |
+      '{
+        "_id": "_design\/listener",
+        "filters": {},
+        "updates": {},
+        "views": {
+          "by_status": {
+            "map": "function (doc) { if (doc.type == ''mail'') { emit([doc.status, doc.receivedAt], 1); } }"
+          },
+          "by_route": {
+            "map": "function (doc) { if (doc.type == ''mail'') { emit([doc.route, doc.receivedAt], 1); } }"
+          }
+        }
+      }'

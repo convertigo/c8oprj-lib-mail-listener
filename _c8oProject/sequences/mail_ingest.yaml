@@ -1,0 +1,156 @@
+accessibility: Private
+comment: Stores a batch of fetched mails as mail-<uid> documents (409 = already stored), routes each new one through mail_route, then commits the state-inbox cursor. The cursor only advances over mails that are actually stored. Called by mail_poll; callable alone in Studio with a synthetic batch.
+↓prepare [steps.SimpleStep-1791305813287]: 
+  comment: Parses the batch and initialises the cursor bookkeeping.
+  expression: |
+    '// Parses the batch handed over by mail_poll (UID order matters for the cursor) and initialises the bookkeeping.
+    mail_list = JSON.parse(String(mails || "[]"));
+    mail_list.sort(function (a, b) { return a.uid - b.uid; });
+    cursor_uid = Number(last_uid) || 0;
+    cursor_blocked = false;
+    ingest_stats = { fetched: mail_list.length, saved: 0, duplicates: 0, failed: 0, savedIds: [], failedIds: [] };'
+↓foreach_mail [steps.SimpleIteratorStep-1791305813289]: 
+  comment: Iterates over the batch (item = current mail).
+  expression: mail_list
+  ↓prepare_save [steps.SimpleStep-1791305813291]: 
+    comment: Builds the mail-<uid> document for save_mail.
+    expression: |
+      '// Builds the mail-<uid> document; the save_mail step variables pick _id and _use_json_base from this scope.
+      _id = "mail-" + item.uid;
+      _use_json_base = JSON.stringify({
+        type: "mail",
+        uid: item.uid,
+        mailbox: item.mailbox,
+        from: item.from,
+        subject: item.subject,
+        body: item.body,
+        receivedAt: item.receivedAt,
+        attachments: item.attachments,
+        status: "pending",
+        route: "",
+        routedAt: "",
+        error: null
+      });
+      save_status = "";'
+  ↓save_mail [steps.TransactionStep-1791305813293]: 
+    comment: 'Creates mail-<uid> with status=pending (policy none: an existing document answers 409).'
+    sourceTransaction: lib_MailListener.maillistener.post_document
+    ↓_id [variables.StepVariable-1791305813295]: 
+      description: From the JavaScript scope (prepare_save)
+    ↓_use_json_base [variables.StepVariable-1791305813297]: 
+      description: From the JavaScript scope (prepare_save)
+  ↓read_save_status [steps.SimpleSourceStep-1791305848603]: 
+    comment: HTTP status of the save (201 created, 409 already stored).
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791305813293
+          - java.lang.String: 
+            - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+    variableName: save_status
+  ↓track [steps.SimpleStep-1791305848638]: 
+    comment: Counts the outcome, advances the cursor while every mail so far is stored, decides whether to route.
+    expression: |
+      '// Advances the cursor only while every mail so far is stored (201/202 created, 409 already stored by a previous poll).
+      var saveCode = String(save_status);
+      if (saveCode == "201" || saveCode == "202") {
+        ingest_stats.saved++;
+        ingest_stats.savedIds.push(_id);
+      } else if (saveCode == "409") {
+        ingest_stats.duplicates++;
+      } else {
+        ingest_stats.failed++;
+        ingest_stats.failedIds.push(_id);
+        cursor_blocked = true;
+      }
+      if (!cursor_blocked) {
+        cursor_uid = Math.max(cursor_uid, Number(item.uid));
+      }
+      docid = _id;
+      route_needed = saveCode == "201" || saveCode == "202";'
+  ↓if_new_mail [steps.IfStep-1791305848658]: 
+    comment: Only a mail stored by this poll is routed; a 409 means it was already handled.
+    condition: route_needed
+    ↓call_route [steps.SequenceStep-1791305848663]: 
+      comment: Routes the new mail.
+      sourceSequence: lib_MailListener.mail_route
+      ↓docid [variables.StepVariable-1791305848665]: 
+        description: From the JavaScript scope (track)
+↓compute_state [steps.SimpleStep-1791305813299]: 
+  comment: Finalises the cursor and builds the state-inbox update.
+  expression: |
+    '// Nothing left on the server and no failure: jump to uid_next - 1 so UID gaps are not fetched again.
+    if (!cursor_blocked && String(has_more) != "true" && Number(uid_next) > 0) {
+      cursor_uid = Math.max(cursor_uid, Number(uid_next) - 1);
+    }
+    _id = "state-inbox";
+    _use_json_base = JSON.stringify({
+      type: "state",
+      lastUid: cursor_uid,
+      uidValidity: uid_validity == null ? "" : String(uid_validity),
+      lastPollAt: new Date().toISOString(),
+      running: false
+    });
+    state_save_status = "";'
+↓update_state [steps.TransactionStep-1791305813301]: 
+  comment: Merges the new cursor into state-inbox (created on first run).
+  sourceTransaction: lib_MailListener.maillistener.update_document
+  ↓_id [variables.StepVariable-1791305813303]: 
+    description: From the JavaScript scope (compute_state)
+  ↓_use_json_base [variables.StepVariable-1791305813305]: 
+    description: From the JavaScript scope (compute_state)
+↓read_state_status [steps.SimpleSourceStep-1791305848670]: 
+  comment: HTTP status of the state-inbox update.
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791305813301
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+  variableName: state_save_status
+↓check_state [steps.SimpleStep-1791305848681]: 
+  comment: Fails the run if the cursor was not persisted, then builds the summary.
+  expression: |
+    '// CouchDB reports a failed write as a normal response: fail the run instead of silently keeping a stale cursor.
+    if (!/^20[12]$/.test(String(state_save_status))) {
+      throw new Error("state-inbox update failed, HTTP status " + state_save_status);
+    }
+    ingest_summary = {
+      lastUid: cursor_uid,
+      hasMore: String(has_more) == "true",
+      fetched: ingest_stats.fetched,
+      saved: ingest_stats.saved,
+      duplicates: ingest_stats.duplicates,
+      failed: ingest_stats.failed,
+      savedIds: ingest_stats.savedIds,
+      failedIds: ingest_stats.failedIds
+    };'
+↓result [steps.JsonToXmlStep-1791305848688]: 
+  comment: Public summary of the run.
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: ingest_summary
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
+↓mails [variables.RequestableVariable-1791305813277]: 
+  description: 'JSON array of mails: [{uid, mailbox, from, subject, body, receivedAt, attachments}]'
+↓last_uid [variables.RequestableVariable-1791305813279]: 
+  description: Cursor before this batch (highest UID already handled)
+↓uid_next [variables.RequestableVariable-1791305813281]: 
+  description: Mailbox UIDNEXT at fetch time
+↓uid_validity [variables.RequestableVariable-1791305813283]: 
+  description: Mailbox UIDVALIDITY at fetch time
+↓has_more [variables.RequestableVariable-1791305813285]: 
+  description: true when the fetch was capped and mails remain on the server
+  value: false

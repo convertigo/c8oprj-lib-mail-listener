@@ -1,0 +1,21 @@
+{
+ "Navigation": "Navigation",
+ "Home": "Accueil",
+ "Project_created": "Projet créé",
+ "Start_building_your_app": "Commencez à construire votre application depuis l'arbre du projet.",
+ "Add_your_first_page": "1. Ajoutez votre première page.",
+ "Create_a_sequence_for_backend_logic": "2. Créez une séquence pour la logique backend.",
+ "Run_and_preview_from_Studio": "3. Lancez et prévisualisez depuis Studio.",
+ "menu_title": "Navigation",
+ "home_title": "Accueil",
+ "home_card_title": "Projet créé",
+ "home_card_intro": "Commencez à construire votre application depuis l'arbre du projet.",
+ "home_step_1": "Ajoutez votre première page.",
+ "home_step_2": "Créez une séquence pour la logique backend.",
+ "home_step_3": "Lancez et prévisualisez depuis Studio.",
+ "Lang_English": "Anglais",
+   "Lang_French": "Français",
+   "Lang_Italian": "Italien",
+   "Lang_Spanish": "Espagnol",
+   "Lang_Cancel": "Annuler"
+}

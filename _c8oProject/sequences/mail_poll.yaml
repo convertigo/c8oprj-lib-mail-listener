@@ -1,0 +1,140 @@
+accessibility: Private
+comment: Polls the IMAP inbox for mails with uid > state.lastUid (at most max_per_poll per run) and hands the batch to mail_ingest, which stores, routes and commits the cursor. First run (or UIDVALIDITY change) starts from the current UIDNEXT. Scheduled outside the project (administration console).
+↓get_state [steps.TransactionStep-1791302911098]: 
+  comment: Reads the state-inbox document (lastUid cursor + running lock).
+  sourceTransaction: lib_MailListener.maillistener.get_document
+  ↓_use_docid [variables.StepVariable-1791302919487]: 
+    value: state-inbox
+↓read_lastuid [steps.SimpleSourceStep-1791302995700]: 
+  comment: Extracts lastUid from the state document.
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791302911098
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/lastUid/text()
+  variableName: lastUidVar
+↓read_uidvalidity [steps.SimpleSourceStep-1791305897346]: 
+  comment: Extracts the stored UIDVALIDITY (empty before the first run).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791302911098
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/uidValidity/text()
+  variableName: uidValidityVar
+↓fetch_mails [steps.SimpleStep-1791302907429]: 
+  comment: Connects to the IMAP mailbox, fetches mails with uid > lastUid (capped by max_per_poll), extracts from/subject/body/attachments and exposes mails, last_uid, uid_next, uid_validity, has_more for call_ingest. IMAP errors fail the run.
+  expression: |
+    '// IMAP fetch (engine-embedded javax.mail). Reads the stored cursor (lastUidVar, uidValidityVar) and hands
+    // mails / last_uid / uid_next / uid_validity / has_more to the call_ingest step variables.
+    // First run (no cursor yet) or UIDVALIDITY change: start from now instead of replaying the mailbox history.
+    var imapHost = "${imap.host=imap.gmail.com}";
+    var imapPort = "${imap.port=993}";
+    var imapUser = "${imap.user=changeme}";
+    var imapPassword = "${imap.password=changeme}";
+    var imapFolder = "${imap.folder=INBOX}";
+    var maxPerPoll = Math.max(1, Number(max_per_poll) || 50);
+    var storedLastUid = Number(typeof lastUidVar == "undefined" ? 0 : lastUidVar) || 0;
+    var storedUidValidity = (typeof uidValidityVar == "undefined" || uidValidityVar == null) ? "" : String(uidValidityVar);
+    
+    var fetched = [];
+    var initialize = false;
+    var moreLeft = false;
+    var uidNext = 0;
+    var uidValidity = "";
+    var store = null;
+    var inbox = null;
+    try {
+      var props = new java.util.Properties();
+      props.put("mail.store.protocol", "imaps");
+      props.put("mail.imaps.host", imapHost);
+      props.put("mail.imaps.port", imapPort);
+      props.put("mail.imaps.ssl.enable", "true");
+      // The embedded javax.mail defaults to TLS versions the JDK disables, and does not check the server name
+      props.put("mail.imaps.ssl.protocols", "TLSv1.2 TLSv1.3");
+      props.put("mail.imaps.ssl.checkserveridentity", "true");
+      store = javax.mail.Session.getInstance(props, null).getStore("imaps");
+      store.connect(imapHost, Number(imapPort), imapUser, imapPassword);
+      inbox = store.getFolder(imapFolder);
+      inbox.open(javax.mail.Folder.READ_ONLY);
+      uidNext = Number(inbox.getUIDNext());
+      uidValidity = String(inbox.getUIDValidity());
+      initialize = storedLastUid <= 0 || (storedUidValidity != "" && storedUidValidity != uidValidity);
+      var fromUid = initialize ? uidNext : storedLastUid + 1;
+      if (uidNext - 1 >= fromUid) {
+        var msgs = inbox.getMessagesByUID(fromUid, uidNext - 1);
+        for (var i = 0; i < msgs.length; i++) {
+          var m = msgs[i];
+          var uid = Number(inbox.getUID(m));
+          if (uid < fromUid) { continue; }
+          if (fetched.length >= maxPerPoll) { moreLeft = true; break; }
+          var from = "";
+          try { var fa = m.getFrom(); if (fa && fa.length > 0) { from = String(fa[0]); } } catch (e) {}
+          var subject = "";
+          try { subject = String(m.getSubject()); } catch (e) {}
+          var receivedAt = "";
+          try { var d = m.getReceivedDate(); if (d) { receivedAt = new Date(d.getTime()).toISOString(); } } catch (e) {}
+          var body = "";
+          var attachments = [];
+          try {
+            var content = m.getContent();
+            if (content && typeof content === "object" && content instanceof javax.mail.Multipart) {
+              var parts = content.getCount();
+              for (var p = 0; p < parts; p++) {
+                var bp = content.getBodyPart(p);
+                var disp = String(bp.getDisposition() || "");
+                var mime = String(bp.getContentType() || "");
+                if (disp == "ATTACHMENT" || (mime.indexOf("attachment") >= 0)) {
+                  var fn = String(bp.getFileName() || ("attachment_" + p));
+                  attachments.push(fn);
+                } else if (mime.indexOf("text/plain") === 0) {
+                  body = String(bp.getContent());
+                }
+              }
+            } else if (typeof content === "string") {
+              body = content;
+            }
+          } catch (e) { body = ""; }
+          fetched.push({
+            uid: uid,
+            mailbox: imapUser,
+            from: from,
+            subject: subject,
+            body: body,
+            receivedAt: receivedAt,
+            attachments: attachments
+          });
+        }
+      }
+    } finally {
+      try { if (inbox && inbox.isOpen()) { inbox.close(false); } } catch (e) {}
+      try { if (store) { store.close(); } } catch (e) {}
+    }
+    
+    mails = JSON.stringify(fetched);
+    last_uid = String(initialize ? uidNext - 1 : storedLastUid);
+    uid_next = String(uidNext);
+    uid_validity = uidValidity;
+    has_more = String(moreLeft);'
+↓call_ingest [steps.SequenceStep-1791305897374]: 
+  comment: Stores, routes and commits the cursor for the fetched batch.
+  output: true
+  sourceSequence: lib_MailListener.mail_ingest
+  ↓mails [variables.StepVariable-1791305897376]: 
+    description: From the JavaScript scope (fetch_mails)
+  ↓last_uid [variables.StepVariable-1791305897378]: 
+    description: From the JavaScript scope (fetch_mails)
+  ↓uid_next [variables.StepVariable-1791305897380]: 
+    description: From the JavaScript scope (fetch_mails)
+  ↓uid_validity [variables.StepVariable-1791305897382]: 
+    description: From the JavaScript scope (fetch_mails)
+  ↓has_more [variables.StepVariable-1791305897384]: 
+    description: From the JavaScript scope (fetch_mails)
+↓max_per_poll [variables.RequestableVariable-1791305897339]: 
+  description: Maximum number of mails fetched per run; the rest is picked up by the next run
+  value: 50

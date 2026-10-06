@@ -1,0 +1,17 @@
+comment: Temporary test sequence to inspect SimpleStep output node naming. Delete after use.
+↓myvalue [steps.SimpleStep-1791304918556]: 
+  expression: '"HELLO-777"'
+  output: true
+↓read_text [steps.SimpleSourceStep-1791304974538]: 
+  comment: reads myvalue via ./text()
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791304918556
+        - java.lang.String: 
+          - ↑value: .
+  variableName: v1
+↓show [steps.SimpleStep-1791304977354]: 
+  expression: 'throw new Error("ZZDEBUG v1=" + String(v1 === undefined ? "UNDEFINED" : v1));'

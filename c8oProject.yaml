@@ -1,0 +1,24 @@
+↑convertigo: 8.3.0.m006
+↓lib_MailListener [core.Project]: 
+  comment: Convertigo NGX builder Project
+  contextTimeout: 59
+  corsOrigin: =Origin
+  httpSessionTimeout: 60
+  version: 8.4.0
+  ↓maillistener [connectors.FullSyncConnector]: 🗏 connectors/maillistener.yaml
+  ↓void [connectors.SqlConnector]: 🗏 connectors/void.yaml
+  ↓demo_business [sequences.GenericSequence]: 🗏 sequences/demo_business.yaml
+  ↓mail_ingest [sequences.GenericSequence]: 🗏 sequences/mail_ingest.yaml
+  ↓mail_poll [sequences.GenericSequence]: 🗏 sequences/mail_poll.yaml
+  ↓mail_route [sequences.GenericSequence]: 🗏 sequences/mail_route.yaml
+  ↓zz_test_step_output [sequences.GenericSequence]: 🗏 sequences/zz_test_step_output.yaml
+  ↓project1 [references.ProjectSchemaReference]: 
+    projectName: mobilebuilder_tpl_8_4_0_ngx=https://github.com/convertigo/c8oprj-mobilebuilder-tpl/archive/mobilebuilder_tpl_8_4_0_ngx.zip
+  ↓Application [core.MobileApplication]: 
+    comment: Describes the mobile application global properties
+    splashRemoveMode: beforeUpdate
+    ↓Android [mobileplatforms.Android]: 
+      comment: Android platform
+    ↓iOS [mobileplatforms.IOs]: 
+      comment: iOS platform
+    ↓NgxApp [ngx.components.ApplicationComponent]: 🗏 mobileNgxApp.yaml

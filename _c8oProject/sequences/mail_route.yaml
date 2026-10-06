@@ -1,0 +1,165 @@
+accessibility: Private
+comment: 'Routes a stored mail document to a business sequence based on rules, then writes status/route/routedAt back on the document. Input: docid (mail-<uid>). V1 rules: rule_urgent (subject contains URGENT), rule_domain (sender domain). No match: status unmatched.'
+↓inputVars [steps.InputVariablesStep-1791304583584]: 
+  comment: Exposes the sequence input variables (docid) as XML so later steps can source them.
+↓get_mail [steps.TransactionStep-1791303053796]: 
+  comment: Loads the mail document by docid.
+  sourceTransaction: lib_MailListener.maillistener.get_document
+  ↓_use_docid [variables.StepVariable-1791303053798]: 
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791304583584
+          - java.lang.String: 
+            - ↑value: ./docid/text()
+↓src_from [steps.SimpleSourceStep-1791303068450]: 
+  comment: Extracts from.
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791303053796
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/from/text()
+  variableName: from_var
+↓src_subject [steps.SimpleSourceStep-1791303068469]: 
+  comment: Extracts subject.
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791303053796
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/subject/text()
+  variableName: subject_var
+↓src_body [steps.SimpleSourceStep-1791303068487]: 
+  comment: Extracts body.
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791303053796
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/body/text()
+  variableName: body_var
+↓src_mail_status [steps.SimpleSourceStep-1791305848704]: 
+  comment: HTTP status of get_mail (200 when the document exists).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791303053796
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+  variableName: mail_http_status
+↓read_mail_fields [steps.SimpleStep-1791303057423]: 
+  comment: Checks the mail exists and decides the route (V1 rules). Sets route_var and status_var.
+  expression: |
+    '// Decides the route (V1 rules) from the fields exposed by the src_* steps. Sets route_var and status_var.
+    if (String(mail_http_status) != "200") {
+      throw new Error("Mail document " + docid + " not found (HTTP " + mail_http_status + ")");
+    }
+    var from = String(from_var);
+    var subject = String(subject_var);
+    var body = String(body_var);
+    var decided = "";
+    // Rule 1: subject contains URGENT
+    if (subject.toUpperCase().indexOf("URGENT") >= 0) {
+      decided = "rule_urgent";
+    }
+    // Rule 2: sender from a given domain (example: convertigo.com)
+    else if (from.indexOf("@convertigo.com") >= 0) {
+      decided = "rule_domain";
+    }
+    route_var = decided;
+    status_var = (decided === "") ? "unmatched" : "routed";'
+↓is_rule_urgent [steps.IfThenElseStep-1791303110548]: 
+  comment: 'Dispatch rule 1: subject contains URGENT.'
+  condition: route_var == "rule_urgent"
+  ↓then_urgent [steps.ThenStep-1791303115347]: 
+    ↓call_business_urgent [steps.SequenceStep-1791303119501]: 
+      comment: Calls the demo business sequence for rule_urgent.
+      sourceSequence: lib_MailListener.demo_business
+      ↓docid [variables.StepVariable-1791303123731]: 
+        sourceDefinition: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+            - com.twinsoft.convertigo.beans.common.XMLVector: 
+              - java.lang.String: 
+                - ↑value: 1791304583584
+              - java.lang.String: 
+                - ↑value: ./docid/text()
+      ↓route [variables.StepVariable-1791303123754]: 
+        value: rule_urgent
+↓is_rule_domain [steps.IfStep-1791305848723]: 
+  comment: 'Dispatch rule 2: sender domain.'
+  condition: route_var == "rule_domain"
+  ↓call_business_domain [steps.SequenceStep-1791305848725]: 
+    comment: Calls the demo business sequence for rule_domain.
+    sourceSequence: lib_MailListener.demo_business
+    ↓docid [variables.StepVariable-1791305848727]: 
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1791304583584
+            - java.lang.String: 
+              - ↑value: ./docid/text()
+    ↓route [variables.StepVariable-1791305848729]: 
+      value: rule_domain
+↓prepare_status [steps.SimpleStep-1791305848732]: 
+  comment: Builds the status update for update_status.
+  expression: |
+    '// Persists the routing decision on the mail document; the merge policy keeps the stored mail fields.
+    _id = String(docid);
+    _use_json_base = JSON.stringify({ status: status_var, route: route_var, routedAt: new Date().toISOString() });
+    status_save_status = "";'
+↓update_status [steps.TransactionStep-1791305848743]: 
+  comment: Merges status/route/routedAt into the mail document.
+  sourceTransaction: lib_MailListener.maillistener.update_document
+  ↓_id [variables.StepVariable-1791305848745]: 
+    description: From the JavaScript scope (prepare_status)
+  ↓_use_json_base [variables.StepVariable-1791305848747]: 
+    description: From the JavaScript scope (prepare_status)
+↓read_status_save [steps.SimpleSourceStep-1791305897265]: 
+  comment: HTTP status of the status update.
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791305848743
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+  variableName: status_save_status
+↓check_status [steps.SimpleStep-1791305897277]: 
+  comment: Fails the run if the status was not persisted, then builds the summary.
+  expression: |
+    '// CouchDB reports a failed write as a normal response: fail instead of leaving the mail silently pending.
+    if (!/^20[12]$/.test(String(status_save_status))) {
+      throw new Error("Status update failed for " + docid + ", HTTP status " + status_save_status);
+    }
+    route_summary = { docid: String(docid), route: route_var, status: status_var };'
+↓result [steps.JsonToXmlStep-1791305897283]: 
+  comment: 'Public summary: docid, route, status.'
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: route_summary
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
+↓docid [variables.RequestableVariable-1791303045717]: 
+  description: Mail document id (mail-<uid>)

@@ -1,0 +1,10 @@
+accessibility: Private
+comment: Demo business sequence called by mail_route. Replace with real business sequences in consumer projects.
+↓process [steps.SimpleStep-1791303091885]: 
+  comment: 'Demo processing: echoes the mail summary. Replace with real logic.'
+  expression: '"Demo business sequence called with mailid=" + String(docid || "") + " route=" + String(route || "");'
+  output: true
+↓docid [variables.RequestableVariable-1791303095999]: 
+  description: Mail document id
+↓route [variables.RequestableVariable-1791303102579]: 
+  description: Matched route name

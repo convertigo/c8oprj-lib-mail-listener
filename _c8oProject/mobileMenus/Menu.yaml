@@ -1,0 +1,36 @@
+beanData: '{"ionBean":"Menu"}'
+comment: Main navigation menu
+tagName: ion-menu
+↓Header [ngx.components.UIDynamicElement-1500890727582]: 
+  beanData: '{"ionBean":"Header"}'
+  comment: Menu header container
+  tagName: ion-header
+  ↓ToolBar [ngx.components.UIDynamicElement-1500890731485]: 
+    beanData: '{"ionBean":"ToolBar"}'
+    comment: Toolbar used inside the navigation menu
+    tagName: ion-toolbar
+    ↓BarTitle [ngx.components.UIDynamicElement-1500890752959]: 
+      beanData: '{"ionBean":"BarTitle"}'
+      comment: Title area displayed at the top of the menu
+      tagName: ion-title
+      ↓Text [ngx.components.UIText-1500890755422]: 
+        comment: Translated menu title text
+        i18n: true
+        textValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: plain:Navigation
+↓Content [ngx.components.UIDynamicElement-1500890742326]: 
+  beanData: '{"ionBean":"Content"}'
+  comment: Scrollable container for menu entries
+  tagName: ion-content
+  ↓List [ngx.components.UIDynamicElement-1501343197007]: 
+    beanData: '{"ionBean":"List","Inset":"plain:inset"}'
+    comment: List of available navigation entries
+    tagName: ion-list
+    ↓MenuAutoItems [ngx.components.UIDynamicMenuItems-1500890605250]: 
+      beanData: '{"ionBean":"MenuAutoItems"}'
+      comment: Automatically generated menu items for app pages
+      i18n: true
+      itemtitle: 
+      tagName: button
