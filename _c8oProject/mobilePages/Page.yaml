@@ -1,5 +1,5 @@
 ↑isRoot: true
-comment: Default home page
+comment: 'Admin list of the stored mails. Calls the Private sequence admin_list_mails: on a server engine it only answers a browser session already logged into the Convertigo administration console.'
 icon: home
 preloadPriority: high
 scriptContent: 
@@ -17,7 +17,7 @@ scriptContent:
         	/*End_c8o_PageFunction*/
         
 segment: home
-title: Home
+title: Mails
 ↓Header [ngx.components.UIDynamicElement-1491634212350]: 
   beanData: '{"ionBean":"Header"}'
   comment: Top page header container
@@ -43,12 +43,11 @@ title: Home
       comment: Title container displayed in the toolbar
       tagName: ion-title
       ↓Text [ngx.components.UIText-1491634275121]: 
-        comment: Translated page title key
-        i18n: true
+        comment: Page title
         textValue: 
           - xmlizable: 
             - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
-            - MobileSmartSourceType: plain:Home
+            - MobileSmartSourceType: plain:Mails (admin)
     ↓ButtonSet2 [ngx.components.UIDynamicElement-1588170811054]: 
       beanData: '{"ionBean":"ButtonSet","SetPosition":"plain:end"}'
       comment: Right toolbar button group
@@ -192,70 +191,781 @@ title: Home
   beanData: '{"ionBean":"Content"}'
   comment: Main scrollable content area for the home page
   tagName: ion-content
-  ↓WelcomeCard [ngx.components.UIDynamicElement-1790010000001]: 
-    beanData: '{"ionBean":"Card"}'
-    comment: Introductory card shown on first page load
-    tagName: ion-card
-    ↓CardHeader [ngx.components.UIDynamicElement-1790010000002]: 
-      beanData: '{"ionBean":"CardHeader"}'
-      comment: Header section for the welcome card
-      tagName: ion-card-header
-      ↓CardTitle [ngx.components.UIDynamicElement-1790010000003]: 
-        beanData: '{"ionBean":"CardTitle"}'
-        comment: Title area of the welcome card
-        tagName: ion-card-title
-        ↓Text [ngx.components.UIText-1790010000004]: 
-          comment: Translation key for the welcome card title
-          i18n: true
+  ↓ProgressIf [ngx.components.UIControlDirective-1791384407653]: 
+    comment: Thin progress bar while a page loads; the current list stays visible
+    directiveExpression: local?.loading
+    directiveName: If
+    ↓LoadingBar [ngx.components.UIDynamicElement-1791384408937]: 
+      beanData: '{"ionBean":"ProgressBar","Type":"plain:indeterminate"}'
+      tagName: ion-progress-bar
+      ↓Class [ngx.components.UIAttribute-1791384408939]: 
+        attrName: class
+        attrValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: plain:mail-progress
+  ↓ListToolbar [ngx.components.UIDynamicElement-1791383673404]: 
+    beanData: '{"ionBean":"DivTag"}'
+    comment: Count and refresh button
+    tagName: div
+    ↓CountLine [ngx.components.UIDynamicElement-1791384410223]: 
+      beanData: '{"ionBean":"Paragraph"}'
+      comment: Mails stored in the database
+      tagName: p
+      ↓Class [ngx.components.UIAttribute-1791384410225]: 
+        attrName: class
+        attrValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: plain:mail-count
+      ↓CountValue [ngx.components.UIText-1791384410227]: 
+        textValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: source:{"filter":"Local","project":"lib_MailListener","input":"","model":{"data":[{"localObject":"local"}],"path":"?.results?.all","prefix":"","suffix":"","custom":"","useCustom":false}}
+      ↓CountLabel [ngx.components.UIText-1791384410229]: 
+        textValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: 'plain: mails stored'
+    ↓Class [ngx.components.UIAttribute-1791383673406]: 
+      attrName: class
+      attrValue: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+          - MobileSmartSourceType: plain:mail-toolbar
+    ↓RefreshButton [ngx.components.UIDynamicElement-1791383673414]: 
+      beanData: |
+        '{
+         "ionBean": "Button",
+         "IonFill": "plain:clear",
+         "IonSize": "plain:small"
+        }'
+      comment: Reloads the list
+      tagName: ion-button
+      ↓RefreshClick [ngx.components.UIControlEvent-1791383673418]: 
+        comment: Reload the mail list
+        ↓InvokeRefresh [ngx.components.UIDynamicInvoke-1791384413267]: 
+          beanData: '{"ionBean":"InvokeAction"}'
+          comment: Reloads the current page
+          stack: lib_MailListener.Application.NgxApp.LoadMailsPage
+          ↓page [ngx.components.UIControlVariable-1791384413749]: 
+            varValue: 
+              - xmlizable: 
+                - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                - MobileSmartSourceType: script:c8oPage.local?.results?.page || 1
+      ↓RefreshIcon [ngx.components.UIDynamicElement-1791384411513]: 
+        beanData: |
+          '{
+           "ionBean": "Icon",
+           "IconName": "plain:refresh-outline",
+           "IconSlot": "plain:start"
+          }'
+        tagName: ion-icon
+      ↓RefreshText [ngx.components.UIText-1791384412797]: 
+        textValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: plain:Refresh
+  ↓Filters [ngx.components.UIDynamicElement-1791384415033]: 
+    beanData: '{"ionBean":"DivTag"}'
+    comment: One checkbox per routing status, with its count
+    tagName: div
+    ↓Class [ngx.components.UIAttribute-1791384415035]: 
+      attrName: class
+      attrValue: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+          - MobileSmartSourceType: plain:mail-filters
+    ↓FilterForEach [ngx.components.UIControlDirective-1791384415037]: 
+      directiveIndexName: optIndex
+      directiveItemName: opt
+      directiveSource: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+          - MobileSmartSourceType: source:{"filter":"Local","project":"lib_MailListener","input":"","model":{"data":[{"localObject":"local"}],"path":"?.results?.statusCounts","prefix":"","suffix":"","custom":"","useCustom":false}}
+      ↓FilterCheck [ngx.components.UIDynamicElement-1791384416321]: 
+        beanData: |
+          '{
+           "ionBean": "CheckBox",
+           "ControlName": "plain:name1791384416321",
+           "Checked": "script:!local?.filters || local.filters[opt.status] !== false",
+           "Justify": "plain:start",
+           "LabelPlacement": "plain:end"
+          }'
+        comment: Checked = the status is listed
+        tagName: ion-checkbox
+        ↓Class [ngx.components.UIAttribute-1791384416323]: 
+          attrName: '[class]'
+          attrValue: 
+            - xmlizable: 
+              - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+              - MobileSmartSourceType: script:'mail-filter f-' + opt.status
+        ↓Color [ngx.components.UIAttribute-1791384416325]: 
+          attrName: '[color]'
+          attrValue: 
+            - xmlizable: 
+              - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+              - MobileSmartSourceType: 'script:opt.status == ''routed'' ? ''success'' : ((opt.status == ''error'' || opt.status == ''store_error'') ? ''danger'' : (opt.status == ''pending'' ? ''warning'' : ''medium''))'
+        ↓FilterLabel [ngx.components.UIText-1791384416327]: 
           textValue: 
             - xmlizable: 
               - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
-              - MobileSmartSourceType: plain:Project_created
-    ↓CardContent [ngx.components.UIDynamicElement-1790010000005]: 
-      beanData: '{"ionBean":"CardContent"}'
-      comment: Body section containing onboarding instructions
-      tagName: ion-card-content
-      ↓ParagraphIntro [ngx.components.UIDynamicElement-1790010000006]: 
-        beanData: '{"ionBean":"Paragraph"}'
-        comment: Introductory onboarding sentence
-        tagName: p
-        ↓Text [ngx.components.UIText-1790010000007]: 
-          comment: Translation key for the introductory sentence
-          i18n: true
+              - MobileSmartSourceType: plain:{{ opt.status }}
+        ↓FilterCount [ngx.components.UIDynamicElement-1791384416329]: 
+          beanData: '{"ionBean":"SpanTag"}'
+          tagName: span
+          ↓Class [ngx.components.UIAttribute-1791384416331]: 
+            attrName: class
+            attrValue: 
+              - xmlizable: 
+                - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                - MobileSmartSourceType: plain:mail-filter-count
+          ↓FilterCountText [ngx.components.UIText-1791384416333]: 
+            textValue: 
+              - xmlizable: 
+                - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                - MobileSmartSourceType: plain:{{ opt.count }}
+        ↓FilterChange [ngx.components.UIControlEvent-1791384416335]: 
+          attrName: (ionChange)
+          comment: Stores the checkbox state, then reloads from page 1
+          eventName: ionChange
+          ↓SetFilter [ngx.components.UIDynamicAction-1791384416805]: 
+            beanData: |
+              '{
+               "ionBean": "SetLocalAction",
+               "Property": "plain:filters",
+               "Value": "script:Object.assign({}, c8oPage.local?.filters || {}, {[scope.opt.status]: event.detail.checked})"
+              }'
+            ↓InvokeFilter [ngx.components.UIDynamicInvoke-1791384417287]: 
+              beanData: '{"ionBean":"InvokeAction"}'
+              comment: Back to page 1
+              stack: lib_MailListener.Application.NgxApp.LoadMailsPage
+              ↓page [ngx.components.UIControlVariable-1791384417769]: 
+                varValue: 
+                  - xmlizable: 
+                    - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                    - MobileSmartSourceType: script:1
+  ↓ErrorIf [ngx.components.UIControlDirective-1791383678228]: 
+    directiveExpression: '!local?.loading && local?.error'
+    directiveName: If
+    ↓ErrorNote [ngx.components.UIDynamicElement-1791383679512]: 
+      beanData: '{"ionBean":"Paragraph"}'
+      tagName: p
+      ↓Class [ngx.components.UIAttribute-1791383679514]: 
+        attrName: class
+        attrValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: plain:mail-error
+      ↓ErrorText [ngx.components.UIText-1791383679516]: 
+        textValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: source:{"filter":"Local","project":"lib_MailListener","input":"","model":{"data":[{"localObject":"local"}],"path":"?.errorMessage","prefix":"","suffix":"","custom":"","useCustom":false}}
+  ↓EmptyIf [ngx.components.UIControlDirective-1791383680800]: 
+    directiveExpression: '!local?.loading && !local?.error && local?.results?.items?.length == 0'
+    directiveName: If
+    ↓EmptyNote [ngx.components.UIDynamicElement-1791383682084]: 
+      beanData: '{"ionBean":"Paragraph"}'
+      tagName: p
+      ↓EmptyText [ngx.components.UIText-1791383682086]: 
+        textValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: plain:No mail to show.
+      ↓Class [ngx.components.UIAttribute-1791384468369]: 
+        attrName: class
+        attrValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: plain:mail-empty
+  ↓ResultsIf [ngx.components.UIControlDirective-1791383683370]: 
+    directiveExpression: '!local?.error && local?.results?.items?.length > 0'
+    directiveName: If
+    ↓MailList [ngx.components.UIDynamicElement-1791384469653]: 
+      beanData: '{"ionBean":"DivTag"}'
+      comment: One row per mail of the current page
+      tagName: div
+      ↓Class [ngx.components.UIAttribute-1791384470937]: 
+        attrName: class
+        attrValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: plain:mail-list
+      ↓MailForEach [ngx.components.UIControlDirective-1791384470939]: 
+        directiveIndexName: recordIndex
+        directiveItemName: record
+        directiveSource: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: source:{"filter":"Local","project":"lib_MailListener","input":"","model":{"data":[{"localObject":"local"}],"path":"?.results?.items","prefix":"","suffix":"","custom":"","useCustom":false}}
+        ↓MailRow [ngx.components.UIDynamicElement-1791384470941]: 
+          beanData: '{"ionBean":"DivTag"}'
+          tagName: div
+          ↓Class [ngx.components.UIAttribute-1791384470943]: 
+            attrName: class
+            attrValue: 
+              - xmlizable: 
+                - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                - MobileSmartSourceType: plain:mail-row
+          ↓MailMain [ngx.components.UIDynamicElement-1791384470945]: 
+            beanData: '{"ionBean":"DivTag"}'
+            tagName: div
+            ↓Class [ngx.components.UIAttribute-1791384470947]: 
+              attrName: class
+              attrValue: 
+                - xmlizable: 
+                  - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                  - MobileSmartSourceType: plain:mail-main
+            ↓MailSubject [ngx.components.UIDynamicElement-1791384470949]: 
+              beanData: '{"ionBean":"DivTag"}'
+              tagName: div
+              ↓Class [ngx.components.UIAttribute-1791384470951]: 
+                attrName: class
+                attrValue: 
+                  - xmlizable: 
+                    - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                    - MobileSmartSourceType: plain:mail-subject
+              ↓SubjectText [ngx.components.UIText-1791384470953]: 
+                textValue: 
+                  - xmlizable: 
+                    - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                    - MobileSmartSourceType: plain:{{ record.subject }}
+            ↓MailFrom [ngx.components.UIDynamicElement-1791384470955]: 
+              beanData: '{"ionBean":"DivTag"}'
+              tagName: div
+              ↓Class [ngx.components.UIAttribute-1791384470957]: 
+                attrName: class
+                attrValue: 
+                  - xmlizable: 
+                    - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                    - MobileSmartSourceType: plain:mail-from
+              ↓FromText [ngx.components.UIText-1791384470959]: 
+                textValue: 
+                  - xmlizable: 
+                    - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                    - MobileSmartSourceType: plain:{{ record.from }}
+          ↓MailSide [ngx.components.UIDynamicElement-1791384470961]: 
+            beanData: '{"ionBean":"DivTag"}'
+            tagName: div
+            ↓Class [ngx.components.UIAttribute-1791384470963]: 
+              attrName: class
+              attrValue: 
+                - xmlizable: 
+                  - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                  - MobileSmartSourceType: plain:mail-side
+            ↓MailDate [ngx.components.UIDynamicElement-1791384470965]: 
+              beanData: '{"ionBean":"DivTag"}'
+              tagName: div
+              ↓Class [ngx.components.UIAttribute-1791384470967]: 
+                attrName: class
+                attrValue: 
+                  - xmlizable: 
+                    - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                    - MobileSmartSourceType: plain:mail-date
+              ↓DateText [ngx.components.UIText-1791384470969]: 
+                textValue: 
+                  - xmlizable: 
+                    - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                    - MobileSmartSourceType: plain:{{ record.receivedAt | date:'dd/MM/yy HH:mm' }}
+            ↓MailTags [ngx.components.UIDynamicElement-1791384470971]: 
+              beanData: '{"ionBean":"DivTag"}'
+              tagName: div
+              ↓Class [ngx.components.UIAttribute-1791384470973]: 
+                attrName: class
+                attrValue: 
+                  - xmlizable: 
+                    - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                    - MobileSmartSourceType: plain:mail-tags
+              ↓StatusPill [ngx.components.UIDynamicElement-1791384470975]: 
+                beanData: '{"ionBean":"SpanTag"}'
+                tagName: span
+                ↓Class [ngx.components.UIAttribute-1791384470977]: 
+                  attrName: '[class]'
+                  attrValue: 
+                    - xmlizable: 
+                      - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                      - MobileSmartSourceType: script:'mail-pill pill-' + record.status
+                  comment: Pill colour from the routing status
+                ↓StatusText [ngx.components.UIText-1791384470979]: 
+                  textValue: 
+                    - xmlizable: 
+                      - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                      - MobileSmartSourceType: plain:{{ record.status }}
+              ↓RouteIf [ngx.components.UIControlDirective-1791384470981]: 
+                directiveExpression: record.route
+                directiveName: If
+                ↓RouteTag [ngx.components.UIDynamicElement-1791384470983]: 
+                  beanData: '{"ionBean":"SpanTag"}'
+                  tagName: span
+                  ↓Class [ngx.components.UIAttribute-1791384470985]: 
+                    attrName: class
+                    attrValue: 
+                      - xmlizable: 
+                        - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                        - MobileSmartSourceType: plain:mail-route
+                  ↓RouteText [ngx.components.UIText-1791384470987]: 
+                    textValue: 
+                      - xmlizable: 
+                        - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                        - MobileSmartSourceType: plain:{{ record.route }}
+              ↓AttachIf [ngx.components.UIControlDirective-1791384470989]: 
+                comment: The mail has attachments
+                directiveExpression: record.attachmentCount > 0
+                directiveName: If
+                ↓AttachTag [ngx.components.UIDynamicElement-1791384470991]: 
+                  beanData: '{"ionBean":"SpanTag"}'
+                  tagName: span
+                  ↓Class [ngx.components.UIAttribute-1791384470993]: 
+                    attrName: class
+                    attrValue: 
+                      - xmlizable: 
+                        - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                        - MobileSmartSourceType: plain:mail-attach
+                  ↓Title [ngx.components.UIAttribute-1791384470995]: 
+                    attrName: title
+                    attrValue: 
+                      - xmlizable: 
+                        - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                        - MobileSmartSourceType: plain:Attachments
+                  ↓AttachIcon [ngx.components.UIDynamicElement-1791384470997]: 
+                    beanData: '{"ionBean":"Icon","IconName":"plain:attach-outline"}'
+                    tagName: ion-icon
+                  ↓AttachCount [ngx.components.UIText-1791384470999]: 
+                    textValue: 
+                      - xmlizable: 
+                        - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                        - MobileSmartSourceType: plain:{{ record.attachmentCount }}
+    ↓Pager [ngx.components.UIDynamicElement-1791384472283]: 
+      beanData: '{"ionBean":"DivTag"}'
+      comment: Range and previous / next page
+      tagName: div
+      ↓Class [ngx.components.UIAttribute-1791384473567]: 
+        attrName: class
+        attrValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: plain:mail-pager
+      ↓RangeInfo [ngx.components.UIDynamicElement-1791384473569]: 
+        beanData: '{"ionBean":"SpanTag"}'
+        tagName: span
+        ↓Class [ngx.components.UIAttribute-1791384473571]: 
+          attrName: class
+          attrValue: 
+            - xmlizable: 
+              - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+              - MobileSmartSourceType: plain:mail-range
+        ↓RangeFirst [ngx.components.UIText-1791384473573]: 
           textValue: 
             - xmlizable: 
               - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
-              - MobileSmartSourceType: plain:Start_building_your_app
-      ↓ParagraphStep1 [ngx.components.UIDynamicElement-1790010000008]: 
-        beanData: '{"ionBean":"Paragraph"}'
-        comment: First onboarding step description
-        tagName: p
-        ↓Text [ngx.components.UIText-1790010000009]: 
-          comment: Translation key for onboarding step 1
-          i18n: true
+              - MobileSmartSourceType: source:{"filter":"Local","project":"lib_MailListener","input":"","model":{"data":[{"localObject":"local"}],"path":"?.results?.first","prefix":"","suffix":"","custom":"","useCustom":false}}
+        ↓RangeDash [ngx.components.UIText-1791384473575]: 
           textValue: 
             - xmlizable: 
               - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
-              - MobileSmartSourceType: plain:Add_your_first_page
-      ↓ParagraphStep2 [ngx.components.UIDynamicElement-1790010000010]: 
-        beanData: '{"ionBean":"Paragraph"}'
-        comment: Second onboarding step description
-        tagName: p
-        ↓Text [ngx.components.UIText-1790010000011]: 
-          comment: Translation key for onboarding step 2
-          i18n: true
+              - MobileSmartSourceType: plain:–
+        ↓RangeLast [ngx.components.UIText-1791384473577]: 
           textValue: 
             - xmlizable: 
               - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
-              - MobileSmartSourceType: plain:Create_a_sequence_for_backend_logic
-      ↓ParagraphStep3 [ngx.components.UIDynamicElement-1790010000012]: 
-        beanData: '{"ionBean":"Paragraph"}'
-        comment: Third onboarding step description
-        tagName: p
-        ↓Text [ngx.components.UIText-1790010000013]: 
-          comment: Translation key for onboarding step 3
-          i18n: true
+              - MobileSmartSourceType: source:{"filter":"Local","project":"lib_MailListener","input":"","model":{"data":[{"localObject":"local"}],"path":"?.results?.last","prefix":"","suffix":"","custom":"","useCustom":false}}
+        ↓RangeOf [ngx.components.UIText-1791384473579]: 
           textValue: 
             - xmlizable: 
               - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
-              - MobileSmartSourceType: plain:Run_and_preview_from_Studio
+              - MobileSmartSourceType: 'plain: of '
+        ↓RangeTotal [ngx.components.UIText-1791384473581]: 
+          textValue: 
+            - xmlizable: 
+              - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+              - MobileSmartSourceType: source:{"filter":"Local","project":"lib_MailListener","input":"","model":{"data":[{"localObject":"local"}],"path":"?.results?.total","prefix":"","suffix":"","custom":"","useCustom":false}}
+      ↓PagerNav [ngx.components.UIDynamicElement-1791384473583]: 
+        beanData: '{"ionBean":"DivTag"}'
+        tagName: div
+        ↓Class [ngx.components.UIAttribute-1791384473585]: 
+          attrName: class
+          attrValue: 
+            - xmlizable: 
+              - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+              - MobileSmartSourceType: plain:mail-pager-nav
+        ↓PrevButton [ngx.components.UIDynamicElement-1791384473587]: 
+          beanData: |
+            '{
+             "ionBean": "Button",
+             "Disabled": "script:local?.loading || local?.results?.page <= 1",
+             "IonFill": "plain:clear",
+             "IonSize": "plain:small"
+            }'
+          tagName: ion-button
+          ↓Aria [ngx.components.UIAttribute-1791384473589]: 
+            attrName: aria-label
+            attrValue: 
+              - xmlizable: 
+                - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                - MobileSmartSourceType: plain:Previous page
+          ↓PrevIcon [ngx.components.UIDynamicElement-1791384473591]: 
+            beanData: |
+              '{
+               "ionBean": "Icon",
+               "IconName": "plain:chevron-back-outline",
+               "IconSlot": "plain:icon-only"
+              }'
+            tagName: ion-icon
+          ↓PrevClick [ngx.components.UIControlEvent-1791384473593]: 
+            ↓InvokePrev [ngx.components.UIDynamicInvoke-1791384474063]: 
+              beanData: '{"ionBean":"InvokeAction"}'
+              stack: lib_MailListener.Application.NgxApp.LoadMailsPage
+              ↓page [ngx.components.UIControlVariable-1791384474545]: 
+                varValue: 
+                  - xmlizable: 
+                    - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                    - MobileSmartSourceType: script:(c8oPage.local?.results?.page || 1) - 1
+        ↓PageInfo [ngx.components.UIDynamicElement-1791384474547]: 
+          beanData: '{"ionBean":"SpanTag"}'
+          tagName: span
+          ↓Class [ngx.components.UIAttribute-1791384474549]: 
+            attrName: class
+            attrValue: 
+              - xmlizable: 
+                - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                - MobileSmartSourceType: plain:mail-page-num
+          ↓PageCurrent [ngx.components.UIText-1791384474551]: 
+            textValue: 
+              - xmlizable: 
+                - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                - MobileSmartSourceType: source:{"filter":"Local","project":"lib_MailListener","input":"","model":{"data":[{"localObject":"local"}],"path":"?.results?.page","prefix":"","suffix":"","custom":"","useCustom":false}}
+          ↓PageSlash [ngx.components.UIText-1791384474553]: 
+            textValue: 
+              - xmlizable: 
+                - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                - MobileSmartSourceType: 'plain: / '
+          ↓PageCount [ngx.components.UIText-1791384474555]: 
+            textValue: 
+              - xmlizable: 
+                - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                - MobileSmartSourceType: source:{"filter":"Local","project":"lib_MailListener","input":"","model":{"data":[{"localObject":"local"}],"path":"?.results?.pageCount","prefix":"","suffix":"","custom":"","useCustom":false}}
+        ↓NextButton [ngx.components.UIDynamicElement-1791384474557]: 
+          beanData: |
+            '{
+             "ionBean": "Button",
+             "Disabled": "script:local?.loading || local?.results?.page >= local?.results?.pageCount",
+             "IonFill": "plain:clear",
+             "IonSize": "plain:small"
+            }'
+          tagName: ion-button
+          ↓Aria [ngx.components.UIAttribute-1791384474559]: 
+            attrName: aria-label
+            attrValue: 
+              - xmlizable: 
+                - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                - MobileSmartSourceType: plain:Next page
+          ↓NextIcon [ngx.components.UIDynamicElement-1791384474561]: 
+            beanData: |
+              '{
+               "ionBean": "Icon",
+               "IconName": "plain:chevron-forward-outline",
+               "IconSlot": "plain:icon-only"
+              }'
+            tagName: ion-icon
+          ↓NextClick [ngx.components.UIControlEvent-1791384474563]: 
+            ↓InvokeNext [ngx.components.UIDynamicInvoke-1791384474565]: 
+              beanData: '{"ionBean":"InvokeAction"}'
+              stack: lib_MailListener.Application.NgxApp.LoadMailsPage
+              ↓page [ngx.components.UIControlVariable-1791384474567]: 
+                varValue: 
+                  - xmlizable: 
+                    - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+                    - MobileSmartSourceType: script:(c8oPage.local?.results?.page || 1) + 1
+  ↓CappedIf [ngx.components.UIControlDirective-1791384475851]: 
+    comment: admin_list_mails reads 10 000 documents at most
+    directiveExpression: local?.results?.capped
+    directiveName: If
+    ↓CappedNote [ngx.components.UIDynamicElement-1791384477135]: 
+      beanData: '{"ionBean":"Paragraph"}'
+      tagName: p
+      ↓Class [ngx.components.UIAttribute-1791384477137]: 
+        attrName: class
+        attrValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: plain:mail-note
+      ↓CappedText [ngx.components.UIText-1791384477139]: 
+        textValue: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+            - MobileSmartSourceType: plain:Only 10 000 mails of the database are listed.
+  ↓Class [ngx.components.UIAttribute-1791384406369]: 
+    attrName: class
+    attrValue: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+        - MobileSmartSourceType: plain:mail-page
+↓PageEnter [ngx.components.UIPageEvent-1791383671158]: 
+  comment: Initialises the page state, then loads the mail list
+  ↓InitResults [ngx.components.UIDynamicAction-1791383671628]: 
+    beanData: |
+      '{
+       "ionBean": "SetLocalAction",
+       "Property": "plain:results",
+       "Value": "script:{items: [], total: 0, page: 1, pageCount: 1, first: 0, last: 0, all: 0, capped: false, statusCounts: []}"
+      }'
+    comment: Empty list contract
+    ↓InitError [ngx.components.UIDynamicAction-1791383672110]: 
+      beanData: |
+        '{
+         "ionBean": "SetLocalAction",
+         "Property": "plain:error",
+         "Value": "script:false"
+        }'
+    ↓InitErrorMessage [ngx.components.UIDynamicAction-1791383672112]: 
+      beanData: |
+        '{
+         "ionBean": "SetLocalAction",
+         "Property": "plain:errorMessage",
+         "Value": "script:''''"
+        }'
+    ↓InitFilters [ngx.components.UIDynamicAction-1791384335573]: 
+      beanData: |
+        '{
+         "ionBean": "SetLocalAction",
+         "Property": "plain:filters",
+         "Value": "script:{routed: true, unmatched: true, error: true, pending: true, store_error: true}"
+        }'
+      comment: Every status checked
+      ↓InvokeLoad [ngx.components.UIDynamicInvoke-1791384335575]: 
+        beanData: '{"ionBean":"InvokeAction"}'
+        comment: First page
+        stack: lib_MailListener.Application.NgxApp.LoadMailsPage
+        ↓page [ngx.components.UIControlVariable-1791384336057]: 
+          varValue: 
+            - xmlizable: 
+              - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+              - MobileSmartSourceType: script:1
+↓MailStyle [ngx.components.UIStyle-1791383718667]: 
+  comment: Compact, card-style layout of the admin mail list
+  styleContent: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.FormatedContent
+      - com.twinsoft.convertigo.beans.common.FormatedContent: 
+        →: |
+          '.mail-page {
+            --mail-border: var(--ion-color-step-150, rgba(127, 127, 127, 0.22));
+            --mail-muted: var(--ion-color-step-550, #6b7280);
+            --mail-surface: var(--ion-item-background, var(--ion-background-color, #fff));
+            --mail-hover: rgba(var(--ion-color-primary-rgb, 56, 128, 255), 0.05);
+            font-size: 13px;
+          }
+          .mail-progress {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            height: 2px;
+            margin-bottom: -2px;
+            border-radius: 2px;
+          }
+          .mail-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 8px;
+          }
+          .mail-count {
+            margin: 0;
+            font-size: 12px;
+            color: var(--mail-muted);
+            font-variant-numeric: tabular-nums;
+          }
+          .mail-toolbar ion-button {
+            --padding-start: 8px;
+            --padding-end: 8px;
+            font-size: 12px;
+            text-transform: none;
+            letter-spacing: 0;
+            margin: 0;
+          }
+          .mail-filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 12px;
+          }
+          .mail-filter {
+            --size: 14px;
+            --checkbox-background: transparent;
+            font-size: 12px;
+            padding: 5px 10px;
+            border: 1px solid var(--mail-border);
+            border-radius: 999px;
+            background: var(--mail-surface);
+            transition: border-color 0.15s, background 0.15s;
+          }
+          .mail-filter:hover {
+            background: var(--mail-hover);
+          }
+          .mail-filter.checkbox-checked {
+            border-color: var(--ion-color-base, var(--mail-border));
+            background: rgba(var(--ion-color-base-rgb, 127, 127, 127), 0.08);
+          }
+          .mail-filter-count {
+            margin-left: 6px;
+            padding: 0 6px;
+            border-radius: 999px;
+            background: rgba(127, 127, 127, 0.14);
+            color: var(--mail-muted);
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+          }
+          .mail-list {
+            border: 1px solid var(--mail-border);
+            border-radius: 12px;
+            overflow: hidden;
+            background: var(--mail-surface);
+          }
+          .mail-row {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 9px 14px;
+            border-bottom: 1px solid var(--mail-border);
+            transition: background 0.12s;
+          }
+          .mail-row:last-child {
+            border-bottom: none;
+          }
+          .mail-row:hover {
+            background: var(--mail-hover);
+          }
+          .mail-main {
+            flex: 1;
+            min-width: 0;
+          }
+          .mail-subject {
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.35;
+            color: var(--ion-text-color);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+          .mail-from {
+            margin-top: 2px;
+            font-size: 12px;
+            color: var(--mail-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+          .mail-side {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 4px;
+            flex-shrink: 0;
+          }
+          .mail-date {
+            font-size: 11.5px;
+            color: var(--mail-muted);
+            font-variant-numeric: tabular-nums;
+          }
+          .mail-tags {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+          }
+          .mail-pill {
+            padding: 3px 8px;
+            border-radius: 999px;
+            font-size: 10.5px;
+            font-weight: 600;
+            line-height: 1;
+            letter-spacing: 0.02em;
+            color: var(--mail-muted);
+            background: rgba(127, 127, 127, 0.14);
+          }
+          .pill-routed {
+            color: var(--ion-color-success-shade, #2dd36f);
+            background: rgba(var(--ion-color-success-rgb, 45, 211, 111), 0.14);
+          }
+          .pill-pending {
+            color: var(--ion-color-warning-shade, #e0ac08);
+            background: rgba(var(--ion-color-warning-rgb, 255, 196, 9), 0.18);
+          }
+          .pill-error,
+          .pill-store_error {
+            color: var(--ion-color-danger, #eb445a);
+            background: rgba(var(--ion-color-danger-rgb, 235, 68, 90), 0.12);
+          }
+          .mail-route {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 11px;
+            color: var(--mail-muted);
+          }
+          .mail-attach {
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            font-size: 11.5px;
+            color: var(--mail-muted);
+          }
+          .mail-attach ion-icon {
+            font-size: 14px;
+          }
+          .mail-pager {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-top: 10px;
+            font-size: 12px;
+            color: var(--mail-muted);
+            font-variant-numeric: tabular-nums;
+          }
+          .mail-pager-nav {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+          }
+          .mail-pager-nav ion-button {
+            margin: 0;
+            --padding-start: 6px;
+            --padding-end: 6px;
+          }
+          .mail-page-num {
+            min-width: 56px;
+            text-align: center;
+          }
+          .mail-error {
+            padding: 10px 12px;
+            border-radius: 10px;
+            font-size: 13px;
+            color: var(--ion-color-danger, #eb445a);
+            background: rgba(var(--ion-color-danger-rgb, 235, 68, 90), 0.08);
+          }
+          .mail-empty {
+            padding: 32px 0;
+            text-align: center;
+            font-size: 13px;
+            color: var(--mail-muted);
+          }
+          .mail-note {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--mail-muted);
+          }
+          @media (max-width: 600px) {
+            .mail-row {
+              flex-direction: column;
+              align-items: stretch;
+              gap: 6px;
+            }
+            .mail-side {
+              flex-direction: row;
+              align-items: center;
+              justify-content: space-between;
+            }
+          }
+          '

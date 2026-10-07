@@ -1,0 +1,108 @@
+accessibility: Private
+comment: 'Admin list of the stored mails for the NGX admin page, newest first, one page at a time. Variables: page (from 1), page_size (25, max 100), statuses (comma-separated, empty = all, ''none'' = nothing). Returns {items: [{docid, from, subject (80 chars max), receivedAt, status, route, hasAttachments, attachmentCount}], total (after the filter), page, pageSize, pageCount, first, last, all (before the filter), capped (true when the 10 000 documents limit was reached), counts: {routed, unmatched, error, pending, store_error}, statusCounts: [{status, count}] (same counts, as a list)}. Private on purpose: only a session authenticated in the Convertigo administration console can call it from the app (anonymous HTTP calls are refused on a server engine; the Studio allows Private calls for development).'
+↓find [steps.TransactionStep-1791383567927]: 
+  comment: Loads the mail documents (list fields only).
+  sourceTransaction: lib_MailListener.maillistener.find_mails
+↓read_docs [steps.JsonSourceStep-1791383579465]: 
+  comment: Mail documents as a JS array (null when none).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791383567927
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/docs
+  variableName: mail_docs
+↓shape [steps.SimpleStep-1791383579525]: 
+  comment: 'Builds the list contract: status counts, status filter, newest first, one page, subject shortened, attachment indicator.'
+  expression: |
+    '// Admin list contract: status counts (on all mails), status filter, newest first, one page.
+    var STATUSES = ["routed", "unmatched", "error", "pending", "store_error"];
+    var docs = mail_docs || [];
+    
+    var counts = {};
+    for (var s = 0; s < STATUSES.length; s++) { counts[STATUSES[s]] = 0; }
+    for (var c = 0; c < docs.length; c++) {
+      var st = String(docs[c].status || "");
+      if (counts[st] != null) { counts[st]++; }
+    }
+    var statusCounts = [];
+    for (var t = 0; t < STATUSES.length; t++) { statusCounts.push({ status: STATUSES[t], count: counts[STATUSES[t]] }); }
+    
+    // statuses: empty = all, otherwise the listed ones (''none'' matches nothing).
+    var wanted = null;
+    var filter = String(statuses == null ? "" : statuses).trim();
+    if (filter != "" && filter != "null") {
+      wanted = {};
+      var parts = filter.split(",");
+      for (var w = 0; w < parts.length; w++) { wanted[parts[w].trim()] = true; }
+    }
+    var kept = [];
+    for (var k = 0; k < docs.length; k++) {
+      if (wanted == null || wanted[String(docs[k].status || "")]) { kept.push(docs[k]); }
+    }
+    kept.sort(function (a, b) { return String(b.receivedAt || "").localeCompare(String(a.receivedAt || "")); });
+    
+    var size = parseInt(page_size, 10);
+    if (isNaN(size) || size < 1) { size = 25; }
+    if (size > 100) { size = 100; }
+    var pageCount = Math.max(1, Math.ceil(kept.length / size));
+    var current = parseInt(page, 10);
+    if (isNaN(current) || current < 1) { current = 1; }
+    if (current > pageCount) { current = pageCount; }
+    var start = (current - 1) * size;
+    var end = Math.min(start + size, kept.length);
+    
+    var items = [];
+    for (var i = start; i < end; i++) {
+      var d = kept[i];
+      var subject = String(d.subject || "").trim();
+      if (subject == "" || subject == "null") { subject = "(no subject)"; }
+      var attachments = d.attachments || [];
+      items.push({
+        docid: String(d._id),
+        from: String(d.fromAddress || d.from || ""),
+        subject: subject.length > 80 ? subject.substring(0, 79) + "…" : subject,
+        receivedAt: String(d.receivedAt || ""),
+        status: String(d.status || ""),
+        route: String(d.route || ""),
+        hasAttachments: attachments.length > 0,
+        attachmentCount: attachments.length
+      });
+    }
+    admin_list = {
+      items: items,
+      total: kept.length,
+      page: current,
+      pageSize: size,
+      pageCount: pageCount,
+      first: kept.length == 0 ? 0 : start + 1,
+      last: end,
+      all: docs.length,
+      capped: docs.length >= 10000,
+      counts: counts,
+      statusCounts: statusCounts
+    };'
+↓result [steps.JsonToXmlStep-1791383579555]: 
+  comment: Public contract {items, total}.
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: admin_list
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
+↓page [variables.RequestableVariable-1791384138240]: 
+  description: Page number, from 1 (clamped to the last page)
+  value: 1
+↓page_size [variables.RequestableVariable-1791384138250]: 
+  description: Mails per page, 1 to 100
+  value: 25
+↓statuses [variables.RequestableVariable-1791384138258]: 
+  description: Comma-separated statuses to keep (routed, unmatched, error, pending, store_error). Empty = all; 'none' = nothing

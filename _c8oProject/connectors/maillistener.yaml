@@ -10,11 +10,24 @@ databaseName: maillistener
   p_selector: '({ type: "mail", storedAt: { "$lt": "" } })'
   ↓_use_selector [variables.RequestableVariable-1791376317043]: 
     description: Mango selector (JSON) built by mail_purge
+↓find_mails [transactions.couchdb.PostFindTransaction]: 
+  comment: 'Mango query for the admin list: every mail document with the fields the list shows (10 000 at most; the retention purge keeps the database small). Sorting, filtering and paging are done by admin_list_mails.'
+  p_fields: '["_id", "from", "fromAddress", "subject", "receivedAt", "status", "route", "attachments"]'
+  p_limit: 10000
+  p_selector: '({ type: "mail" })'
 ↓find_retry_candidates [transactions.couchdb.PostFindTransaction]: 
   comment: 'Mango query: mails left pending (interrupted run) or in error (business sequence failure), for mail_replay.'
   p_fields: '["_id", "status", "attempts"]'
   p_limit: 50
   p_selector: '({ type: "mail", status: { "$in": ["pending", "error"] } })'
+↓get_attachment [transactions.couchdb.GetDocumentAttachmentTransaction]: 
+  comment: 'Reads one attachment file of a mail document for business sequences: attachment name = attachments[i].storedName. Without _use_attpath the file comes back as base64 in couchdb_output/data (keep it for small files); with _use_attpath it is written to that path.'
+  ↓_use_docid [variables.RequestableVariable-1791381479751]: 
+    description: Mail document id (mail-<uid>)
+  ↓_use_attname [variables.RequestableVariable-1791381479753]: 
+    description: Attachment name (attachments[i].storedName)
+  ↓_use_attpath [variables.RequestableVariable-1791381479755]: 
+    description: 'Optional file path to write the attachment to (empty: base64 in the response)'
 ↓get_document [transactions.couchdb.GetDocumentTransaction]: 
   ↓_use_docid [variables.RequestableVariable-1791302852607]: 
     description: Document id

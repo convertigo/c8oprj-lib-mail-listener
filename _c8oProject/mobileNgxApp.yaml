@@ -59,6 +59,7 @@ componentScriptContent:
         '
 tplProjectName: mobilebuilder_tpl_8_4_0_ngx
 ↓Menu [ngx.components.UIDynamicMenu-1500890597895]: 🗏 mobileMenus/Menu.yaml
+↓LoadMailsPage [ngx.components.UIActionStack-1791384164103]: 🗏 mobileSharedActions/LoadMailsPage.yaml
 ↓Page [ngx.components.PageComponent-1500538678074]: 🗏 mobilePages/Page.yaml
 ↓Style [ngx.components.UIStyle-1491635462437]: 
   comment: You can add some global application styles here

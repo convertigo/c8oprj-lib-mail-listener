@@ -1,0 +1,82 @@
+comment: Loads one page of the admin mail list (admin_list_mails) with the checked status filters into page.local.results. Used by page enter, Refresh, Previous/Next and the filter checkboxes.
+exposed: false
+↓page [ngx.components.UIStackVariable-1791384304712]: 
+  comment: Page to load, from 1
+  value: 1
+↓StartLoading [ngx.components.UIDynamicAction-1791384305194]: 
+  beanData: |
+    '{
+     "ionBean": "SetLocalAction",
+     "Property": "plain:loading",
+     "Value": "script:true"
+    }'
+  comment: Shows the progress bar (the current list stays visible)
+  ↓CallList [ngx.components.UIDynamicAction-1791384305676]: 
+    beanData: |
+      '{
+       "ionBean": "CallSequenceAction",
+       "requestable": "plain:lib_MailListener.admin_list_mails",
+       "noLoading": "plain:true"
+      }'
+    comment: 'Private sequence: needs an admin console session on a server engine'
+    ↓ListFailed [ngx.components.UIActionFailureEvent-1791384305684]: 
+      comment: 'Call rejected (typically: no admin console session on a server engine)'
+      ↓FailMessage [ngx.components.UIDynamicAction-1791384306130]: 
+        beanData: |
+          '{
+           "ionBean": "SetLocalAction",
+           "Property": "plain:errorMessage",
+           "Value": "script:''Unable to load the mails. Open this page in a browser session logged into the Convertigo administration console.''"
+          }'
+      ↓FailError [ngx.components.UIDynamicAction-1791384306132]: 
+        beanData: |
+          '{
+           "ionBean": "SetLocalAction",
+           "Property": "plain:error",
+           "Value": "script:true"
+          }'
+      ↓FailStopLoading [ngx.components.UIDynamicAction-1791384306134]: 
+        beanData: |
+          '{
+           "ionBean": "SetLocalAction",
+           "Property": "plain:loading",
+           "Value": "script:false"
+          }'
+    ↓page [ngx.components.UIControlVariable-1791384305678]: 
+      varValue: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+          - MobileSmartSourceType: script:params.page
+    ↓page_size [ngx.components.UIControlVariable-1791384305680]: 
+      varValue: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+          - MobileSmartSourceType: script:25
+    ↓statuses [ngx.components.UIControlVariable-1791384305682]: 
+      comment: 'Checked statuses: '''' when all are checked, ''none'' when none is'
+      varValue: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+          - MobileSmartSourceType: 'script:(() => { const f = c8oPage.local?.filters || {}; const all = [''routed'', ''unmatched'', ''error'', ''pending'', ''store_error'']; const on = all.filter(k => f[k] !== false); return on.length == all.length ? '''' : (on.length ? on.join('','') : ''none''); })()'
+    ↓StoreResults [ngx.components.UIDynamicAction-1791384306136]: 
+      beanData: |
+        '{
+         "ionBean": "SetLocalAction",
+         "Property": "plain:results",
+         "Value": "script:{items: [].concat(out?.result?.items || []), total: Number(out?.result?.total || 0), page: Number(out?.result?.page || 1), pageCount: Number(out?.result?.pageCount || 1), first: Number(out?.result?.first || 0), last: Number(out?.result?.last || 0), all: Number(out?.result?.all || 0), capped: String(out?.result?.capped) == ''true'', statusCounts: [].concat(out?.result?.statusCounts || [])}"
+        }'
+      comment: Normalised list contract
+    ↓ClearError [ngx.components.UIDynamicAction-1791384306138]: 
+      beanData: |
+        '{
+         "ionBean": "SetLocalAction",
+         "Property": "plain:error",
+         "Value": "script:false"
+        }'
+    ↓StopLoading [ngx.components.UIDynamicAction-1791384306140]: 
+      beanData: |
+        '{
+         "ionBean": "SetLocalAction",
+         "Property": "plain:loading",
+         "Value": "script:false"
+        }'

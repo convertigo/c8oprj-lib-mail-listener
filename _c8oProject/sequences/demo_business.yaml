@@ -1,9 +1,163 @@
 accessibility: Private
-comment: Placeholder business sequence, default value of the business_sequence variable of mail_poll. Receives docid (mail-<uid>) and route. Replace it by setting business_sequence to your own sequence (project.sequence).
-↓process [steps.SimpleStep-1791303091885]: 
-  comment: 'Demo processing: echoes the mail summary. Replace with real logic.'
-  expression: '"Demo business sequence called with mailid=" + String(docid || "") + " route=" + String(route || "");'
-  output: true
+comment: 'Reference implementation of the business sequence contract, default value of the business_sequence variable of mail_poll. Input: docid (mail-<uid>) and route. Reads the mail with maillistener.get_document, checks it (missing mail, rule_domain without verified sender: error structure, so mail_route sets status error and mail_replay retries), picks an action per route (open_ticket, file_documents, log_only), reads the stored attachment files with maillistener.get_attachment (files up to 5 MB in memory), logs the action and returns a summary. Read-only, hence idempotent. Copy it into your project and replace the action by your own logic, then set business_sequence to yourProject.yourSequence.'
+↓init [steps.SimpleStep-1791381479825]: 
+  comment: 'Contract input: docid and route, passed by mail_route.'
+  expression: |
+    '// Contract input: docid (mail-<uid>) and route (the matched rule), passed by lib_MailListener.mail_route.
+    _use_docid = String(docid);'
+↓get_mail [steps.TransactionStep-1791381479848]: 
+  comment: Reads the mail document (a sequence of another project calls lib_MailListener.maillistener.get_document the same way, with a reference to lib_MailListener).
+  sourceTransaction: lib_MailListener.maillistener.get_document
+  ↓_use_docid [variables.StepVariable-1791381479850]: 
+    description: From the JavaScript scope (init)
+↓read_mail [steps.JsonSourceStep-1791381541991]: 
+  comment: Mail document as a JS object (a CouchDB error object without _id when missing).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791381479848
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output
+  variableName: mail
+↓decide [steps.SimpleStep-1791381542004]: 
+  comment: Business decision per route, with the checks a real business sequence should do.
+  expression: |
+    '// Demo business logic following the lib_MailListener business sequence contract:
+    // - read the mail document (get_mail), then act according to the route;
+    // - report a business problem with an error structure (if_error): mail_route turns it into status error and
+    //   mail_replay calls this sequence again later;
+    // - stay idempotent (this demo only reads) and quick (it runs inside the mail_poll run).
+    var found = (mail != null && mail._id) ? true : false;
+    demo_error = "";
+    if (!found) {
+      demo_error = "mail document " + docid + " not found";
+    } else if (String(route) == "rule_domain" && String(mail.senderVerified) != "true") {
+      // Defense in depth: never act on a domain rule for a sender that is not authenticated
+      demo_error = "rule_domain requires a verified sender";
+    }
+    has_demo_error = demo_error != "";
+    // A real sequence would do the work here, for example open a ticket for an urgent mail
+    demo_action = String(route) == "rule_urgent" ? "open_ticket" : (String(route) == "rule_domain" ? "file_documents" : "log_only");
+    demo_attachments = [];
+    var list = (found && mail.attachments) ? mail.attachments : [];
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].stored) == "true") { demo_attachments.push(list[i]); }
+    }
+    demo_summary = {
+      docid: String(docid),
+      route: String(route),
+      action: demo_action,
+      from: found ? String(mail.fromAddress || mail.from || "") : "",
+      senderVerified: found && String(mail.senderVerified) == "true",
+      subject: found ? String(mail.subject || "") : "",
+      bodyPreview: found ? String(mail.body || "").substring(0, 200) : "",
+      attachments: []
+    };'
+↓if_error [steps.IfStep-1791381542011]: 
+  comment: 'Business problem: return an error structure (document/error) and stop.'
+  condition: has_demo_error
+  ↓error [steps.XMLErrorStep-1791381542013]: 
+    code: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+        - SmartType: 
+          - ↑mode: PLAIN
+          - →→: 1
+    comment: 'Read by mail_route (document/error/message and details): the mail goes to status error and is retried.'
+    details: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+        - SmartType: 
+          - ↑mode: JS
+          - →→: '"docid=" + docid + ", route=" + route'
+    message: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+        - SmartType: 
+          - ↑mode: JS
+          - →→: demo_error
+  ↓stop [steps.ReturnStep-1791381542015]: 
+↓foreach_attachment [steps.SimpleIteratorStep-1791381542020]: 
+  comment: Reads each stored attachment file (item = attachments[i] with stored true).
+  expression: demo_attachments
+  ↓prepare_read [steps.SimpleStep-1791381542022]: 
+    comment: Exposes the get_attachment variables.
+    expression: |
+      // Files up to 5 MB are read in the response (text as is, binary as base64); for bigger ones a real sequence would
+      // set _use_attpath so get_attachment writes the file to disk instead.
+      _use_docid = String(docid);
+      _use_attname = String(item.storedName);
+      read_status = "";
+      read_data = null;
+      read_skipped = Number(item.storedBytes) > 5 * 1024 * 1024;
+  ↓if_small [steps.IfStep-1791381542024]: 
+    comment: Only small files are read in memory.
+    condition: '!read_skipped'
+    ↓get_file [steps.TransactionStep-1791381542026]: 
+      comment: Reads the attachment file (lib_MailListener.maillistener.get_attachment).
+      sourceTransaction: lib_MailListener.maillistener.get_attachment
+      ↓_use_docid [variables.StepVariable-1791381542028]: 
+        description: From the JavaScript scope (prepare_read)
+      ↓_use_attname [variables.StepVariable-1791381542030]: 
+        description: From the JavaScript scope (prepare_read)
+    ↓read_file_status [steps.SimpleSourceStep-1791381561900]: 
+      comment: HTTP status of the read (200 when the file exists).
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1791381542026
+            - java.lang.String: 
+              - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+      variableName: read_status
+    ↓read_file_data [steps.SimpleSourceStep-1791381562059]: 
+      comment: 'File content: text as is for text/* types, base64 for binary types.'
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1791381542026
+            - java.lang.String: 
+              - ↑value: ./document/couchdb_output/data/text()
+      variableName: read_data
+  ↓record [steps.SimpleStep-1791381542032]: 
+    comment: Adds what was read to the summary (a real sequence would process the data here).
+    expression: |
+      'var data = read_data == null ? "" : String(read_data);
+      var isText = String(item.contentType || "").indexOf("text/") == 0;
+      var clean = isText ? data : data.replace(/\s+/g, "");
+      var padding = (!isText && clean.charAt(clean.length - 1) == "=") ? (clean.charAt(clean.length - 2) == "=" ? 2 : 1) : 0;
+      demo_summary.attachments.push({
+        name: String(item.name),
+        storedName: String(item.storedName),
+        contentType: String(item.contentType),
+        storedBytes: Number(item.storedBytes),
+        read: !read_skipped && String(read_status) == "200",
+        encoding: read_skipped ? null : (isText ? "text" : "base64"),
+        dataBytes: read_skipped ? null : (isText ? data.length : Math.max(0, clean.length * 3 / 4 - padding)),
+        note: read_skipped ? "larger than 5 MB: read it with _use_attpath (file) instead of in memory" : null
+      });'
+↓log [steps.LogStep-1791381542034]: 
+  comment: Traces the demo action in the Context logger.
+  expression: '"demo_business: " + demo_action + " for " + docid + " (route " + route + ", " + demo_summary.attachments.length + " attachment file(s))"'
+↓result [steps.JsonToXmlStep-1791381542036]: 
+  comment: Business result (ignored by mail_route, useful when testing the sequence alone).
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: demo_summary
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
 ↓docid [variables.RequestableVariable-1791303095999]: 
   description: Mail document id
 ↓route [variables.RequestableVariable-1791303102579]: 
