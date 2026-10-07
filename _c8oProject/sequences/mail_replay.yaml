@@ -45,6 +45,8 @@ responseTimeout: 3600
     sourceSequence: lib_MailListener.mail_route
     ↓docid [variables.StepVariable-1791307191008]: 
       description: From the JavaScript scope (set_docid)
+    ↓business_sequence [variables.StepVariable-1791380868982]: 
+      description: From the JavaScript scope (mail_replay variable)
   ↓read_route_status [steps.SimpleSourceStep-1791307205111]: 
     comment: Status written by mail_route (null when mail_route itself failed).
     sourceDefinition: 
@@ -85,3 +87,6 @@ responseTimeout: 3600
 ↓max_attempts [variables.RequestableVariable-1791307158974]: 
   description: Maximum routing attempts per mail before it is left in error for a manual look
   value: 3
+↓business_sequence [variables.RequestableVariable-1791380868945]: 
+  description: Business sequence for matched routes (project.sequence), passed to mail_route
+  value: lib_MailListener.demo_business

@@ -1,5 +1,5 @@
 accessibility: Private
-comment: 'Routes a stored mail document to a business sequence based on rules, then writes status/route/routedAt/attempts/error back on the document. Input: docid (mail-<uid>). V1 rules: rule_urgent (subject contains URGENT, any sender), rule_domain (DMARC-authenticated sender from convertigo.com, exact domain). A matched mail first gets its attachment files stored (mail_store_attachments), then the business sequence runs. No match: unmatched (attachments not stored). Attachment or business failure: error, retried by mail_replay.'
+comment: 'Routes a stored mail document based on rules, then writes status/route/routedAt/attempts/error back on the document. Input: docid (mail-<uid>), business_sequence (project.sequence, default lib_MailListener.demo_business). V1 rules: rule_urgent (subject contains URGENT, any sender), rule_domain (DMARC-authenticated sender from convertigo.com, exact domain). A matched mail first gets its attachment files stored (mail_store_attachments), then business_sequence is called with docid and route. No match: unmatched (attachments not stored). Attachment or business failure: error, retried by mail_replay.'
 responseTimeout: 3600
 ↓inputVars [steps.InputVariablesStep-1791304583584]: 
   comment: Exposes the sequence input variables (docid) as XML so later steps can source them.
@@ -93,7 +93,7 @@ responseTimeout: 3600
           - ↑value: ./document/couchdb_output/attempts/text()
   variableName: attempts_var
 ↓read_mail_fields [steps.SimpleStep-1791303057423]: 
-  comment: Checks the mail exists and decides the route (V1 rules). Sets route_var and status_var.
+  comment: Checks the mail exists, decides the route (V1 rules) and resolves the business sequence target. Sets route_var, status_var, __project, __sequence, route.
   expression: |
     '// Decides the route (V1 rules) from the fields exposed by the src_* steps. Sets route_var and status_var.
     if (String(mail_http_status) != "200") {
@@ -120,7 +120,15 @@ responseTimeout: 3600
       decided = "rule_domain";
     }
     route_var = decided;
-    status_var = (decided === "") ? "unmatched" : "routed";'
+    status_var = (decided === "") ? "unmatched" : "routed";
+    
+    // Business sequence target "project.sequence" (business_sequence variable, set on mail_poll). call_business keeps
+    // demo_business as design-time target; its __project / __sequence step variables redirect the call at runtime.
+    var businessTarget = String(business_sequence || "lib_MailListener.demo_business").trim();
+    var targetDot = businessTarget.indexOf(".");
+    __project = targetDot > 0 ? businessTarget.substring(0, targetDot) : "lib_MailListener";
+    __sequence = targetDot > 0 ? businessTarget.substring(targetDot + 1) : businessTarget;
+    route = decided;'
 ↓if_store_attachments [steps.IfStep-1791380027906]: 
   comment: A matched mail gets its attachment files stored before the business sequence runs.
   condition: route_var != ""
@@ -140,100 +148,75 @@ responseTimeout: 3600
           - java.lang.String: 
             - ↑value: ./document/error/details/text()
     variableName: attachments_error
-↓is_rule_urgent [steps.IfThenElseStep-1791303110548]: 
-  comment: 'Dispatch rule 1: subject contains URGENT (only once the attachments are stored).'
-  condition: route_var == "rule_urgent" && String(attachments_error || "") == ""
-  ↓then_urgent [steps.ThenStep-1791303115347]: 
-    ↓call_business_urgent [steps.SequenceStep-1791303119501]: 
-      comment: Calls the demo business sequence for rule_urgent.
-      sourceSequence: lib_MailListener.demo_business
-      ↓docid [variables.StepVariable-1791303123731]: 
-        sourceDefinition: 
-          - xmlizable: 
-            - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-            - com.twinsoft.convertigo.beans.common.XMLVector: 
-              - java.lang.String: 
-                - ↑value: 1791304583584
-              - java.lang.String: 
-                - ↑value: ./docid/text()
-      ↓route [variables.StepVariable-1791303123754]: 
-        value: rule_urgent
-    ↓src_urgent_error_message [steps.SimpleSourceStep-1791307086343]: 
-      comment: Error raised by the business sequence (exception or XMLErrorStep), null when it succeeded.
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1791303119501
-            - java.lang.String: 
-              - ↑value: ./document/error/message/text()
-      variableName: business_error_message
-    ↓src_urgent_error_details [steps.SimpleSourceStep-1791307086353]: 
-      comment: Error details from the business sequence.
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1791303119501
-            - java.lang.String: 
-              - ↑value: ./document/error/details/text()
-      variableName: business_error_details
-↓is_rule_domain [steps.IfStep-1791305848723]: 
-  comment: 'Dispatch rule 2: sender domain (only once the attachments are stored).'
-  condition: route_var == "rule_domain" && String(attachments_error || "") == ""
-  ↓call_business_domain [steps.SequenceStep-1791305848725]: 
-    comment: Calls the demo business sequence for rule_domain.
+↓if_business [steps.IfStep-1791380869031]: 
+  comment: A matched mail whose attachments are stored is handed to the business sequence.
+  condition: route_var != "" && String(attachments_error || "") == ""
+  ↓reset_business [steps.SimpleStep-1791380989034]: 
+    comment: Marks the business call as attempted; src_business_document then tells whether a response came back.
+    expression: business_document = "not_called";
+  ↓call_business [steps.SequenceStep-1791380869033]: 
+    comment: Calls the business sequence named by business_sequence (project.sequence) with docid and route. The design-time target demo_business is replaced at runtime by the __project / __sequence step variables.
     sourceSequence: lib_MailListener.demo_business
-    ↓docid [variables.StepVariable-1791305848727]: 
-      sourceDefinition: 
-        - xmlizable: 
-          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-          - com.twinsoft.convertigo.beans.common.XMLVector: 
-            - java.lang.String: 
-              - ↑value: 1791304583584
-            - java.lang.String: 
-              - ↑value: ./docid/text()
-    ↓route [variables.StepVariable-1791305848729]: 
-      value: rule_domain
-  ↓src_domain_error_message [steps.SimpleSourceStep-1791307086362]: 
+    ↓__project [variables.StepVariable-1791380869035]: 
+      description: Target project, from the JavaScript scope (read_mail_fields)
+    ↓__sequence [variables.StepVariable-1791380869037]: 
+      description: Target sequence, from the JavaScript scope (read_mail_fields)
+    ↓docid [variables.StepVariable-1791380869039]: 
+      description: Mail document id, from the JavaScript scope (mail_route docid)
+    ↓route [variables.StepVariable-1791380869041]: 
+      description: Matched route name, from the JavaScript scope (read_mail_fields)
+  ↓src_business_error_message [steps.SimpleSourceStep-1791380882458]: 
     comment: Error raised by the business sequence (exception or XMLErrorStep), null when it succeeded.
     sourceDefinition: 
       - xmlizable: 
         - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
         - com.twinsoft.convertigo.beans.common.XMLVector: 
           - java.lang.String: 
-            - ↑value: 1791305848725
+            - ↑value: 1791380869033
           - java.lang.String: 
             - ↑value: ./document/error/message/text()
     variableName: business_error_message
-  ↓src_domain_error_details [steps.SimpleSourceStep-1791307086368]: 
+  ↓src_business_error_details [steps.SimpleSourceStep-1791380882606]: 
     comment: Error details from the business sequence.
     sourceDefinition: 
       - xmlizable: 
         - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
         - com.twinsoft.convertigo.beans.common.XMLVector: 
           - java.lang.String: 
-            - ↑value: 1791305848725
+            - ↑value: 1791380869033
           - java.lang.String: 
             - ↑value: ./document/error/details/text()
     variableName: business_error_details
+  ↓src_business_document [steps.SimpleSourceStep-1791380989053]: 
+    comment: 'Response document of the business sequence: null when the call could not be made at all (unknown or unloaded project).'
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791380869033
+          - java.lang.String: 
+            - ↑value: ./document
+    variableName: business_document
 ↓prepare_status [steps.SimpleStep-1791305848732]: 
   comment: Builds the status update for update_status (error when the business sequence failed).
   expression: |
     '// Persists the routing decision on the mail document; the merge policy keeps the stored mail fields.
-    // Attachment storage failure or business sequence failure (exception or XMLErrorStep) is not absorbed:
-    // the mail becomes status error for mail_replay (the business sequence is not called without its attachments).
+    // Attachment storage failure, business sequence failure (exception or XMLErrorStep) or a business sequence that
+    // could not be called (unknown project) is not absorbed: the mail becomes status error for mail_replay.
     var attachmentsError = String(attachments_error || "");
     var businessMessage = String(business_error_message || "");
     var businessDetails = String(business_error_details || "");
+    var businessUnreachable = route_var != "" && attachmentsError == "" && typeof business_document != "undefined" && business_document == null;
     if (attachmentsError != "") {
       status_var = "error";
       error_var = ("attachments: " + attachmentsError).substring(0, 2000);
     } else if (businessMessage != "" || businessDetails != "") {
       status_var = "error";
       error_var = (businessMessage + (businessDetails != "" ? " | " + businessDetails : "")).substring(0, 2000);
+    } else if (businessUnreachable) {
+      status_var = "error";
+      error_var = "business sequence " + __project + "." + __sequence + " could not be called (is the project loaded?)";
     } else {
       error_var = null;
     }
@@ -288,3 +271,6 @@ responseTimeout: 3600
         - →→: result
 ↓docid [variables.RequestableVariable-1791303045717]: 
   description: Mail document id (mail-<uid>)
+↓business_sequence [variables.RequestableVariable-1791380868922]: 
+  description: Business sequence called for a matched route, as project.sequence (any loaded project); it receives docid and route
+  value: lib_MailListener.demo_business

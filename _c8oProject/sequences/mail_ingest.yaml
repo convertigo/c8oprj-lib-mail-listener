@@ -150,6 +150,8 @@ responseTimeout: 3600
       sourceSequence: lib_MailListener.mail_route
       ↓docid [variables.StepVariable-1791305848665]: 
         description: From the JavaScript scope (track)
+      ↓business_sequence [variables.StepVariable-1791380868967]: 
+        description: From the JavaScript scope (mail_ingest variable)
 ↓compute_state [steps.SimpleStep-1791305813299]: 
   comment: Finalises the cursor and builds the state-inbox update.
   expression: |
@@ -228,3 +230,6 @@ responseTimeout: 3600
 ↓has_more [variables.RequestableVariable-1791305813285]: 
   description: true when the fetch was capped and mails remain on the server
   value: false
+↓business_sequence [variables.RequestableVariable-1791380868933]: 
+  description: Business sequence for matched routes (project.sequence), passed to mail_route
+  value: lib_MailListener.demo_business

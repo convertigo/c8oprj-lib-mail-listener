@@ -1,5 +1,5 @@
 accessibility: Private
-comment: Demo business sequence called by mail_route. Replace with real business sequences in consumer projects.
+comment: Placeholder business sequence, default value of the business_sequence variable of mail_poll. Receives docid (mail-<uid>) and route. Replace it by setting business_sequence to your own sequence (project.sequence).
 ↓process [steps.SimpleStep-1791303091885]: 
   comment: 'Demo processing: echoes the mail summary. Replace with real logic.'
   expression: '"Demo business sequence called with mailid=" + String(docid || "") + " route=" + String(route || "");'

@@ -40,7 +40,8 @@ responseTimeout: 3600
     }
     var maxBytes = maxMb * 1024 * 1024;
     
-    var doc = (mail_doc != null && !mail_doc.error) ? mail_doc : null;
+    // A missing document comes back as a CouchDB error object without _id (a mail may have its own error field)
+    var doc = (mail_doc != null && mail_doc._id) ? mail_doc : null;
     doc_found = doc != null;
     attachments_meta = (doc && doc.attachments) ? doc.attachments : [];
     upload_list = [];

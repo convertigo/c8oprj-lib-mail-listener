@@ -44,7 +44,8 @@ responseTimeout: 3600
   expression: |
     '// Anti-overlap lock on state-inbox (running + runningSince), taken with a compare-and-set write: post_document with
     // the current _rev. A concurrent run gets a 409 and skips; a lock older than lock_ttl_minutes is stale and taken over.
-    var state = (state_doc != null && !state_doc.error) ? state_doc : {};
+    // A missing state document comes back as a CouchDB error object without _id.
+    var state = (state_doc != null && state_doc._id) ? state_doc : {};
     var lockTtlMs = Math.max(1, Number(lock_ttl_minutes) || 15) * 60000;
     var lockedSince = Date.parse(String(state.runningSince || "")) || 0;
     lock_busy = String(state.running) == "true" && (Date.now() - lockedSince) < lockTtlMs;
@@ -278,6 +279,8 @@ responseTimeout: 3600
       description: From the JavaScript scope (fetch_mails)
     ↓has_more [variables.StepVariable-1791307362475]: 
       description: From the JavaScript scope (fetch_mails)
+    ↓business_sequence [variables.StepVariable-1791380868991]: 
+      description: From the JavaScript scope (mail_poll variable)
   ↓src_ingest_error [steps.SimpleSourceStep-1791307395833]: 
     comment: Error raised by mail_ingest (null when it succeeded).
     sourceDefinition: 
@@ -293,6 +296,8 @@ responseTimeout: 3600
     comment: Retries pending / error mails while the lock is held.
     output: true
     sourceSequence: lib_MailListener.mail_replay
+    ↓business_sequence [variables.StepVariable-1791380869001]: 
+      description: From the JavaScript scope (mail_poll variable)
   ↓src_replay_error [steps.SimpleSourceStep-1791307395840]: 
     comment: Error raised by mail_replay (null when it succeeded).
     sourceDefinition: 
@@ -373,3 +378,6 @@ responseTimeout: 3600
 ↓lock_ttl_minutes [variables.RequestableVariable-1791307362391]: 
   description: A lock older than this (crashed run) is considered stale and taken over; keep it above the longest expected run (large attachments)
   value: 60
+↓business_sequence [variables.RequestableVariable-1791380868952]: 
+  description: Business sequence called for each matched mail, as project.sequence (a sequence of any loaded project); it receives docid and route
+  value: lib_MailListener.demo_business
