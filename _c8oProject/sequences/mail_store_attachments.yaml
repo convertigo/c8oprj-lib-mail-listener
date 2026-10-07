@@ -1,0 +1,291 @@
+accessibility: Private
+comment: 'Stores the attachment files of a routed mail as CouchDB attachments of mail-<uid> (name: <index>-<safe name>, original name kept in the attachments metadata). The message is fetched again from IMAP by UID (UIDVALIDITY checked) and each part goes through a temp file. Parts above lib_maillistener.attachments.max_mb (default 500) are listed as skipped (too_large). Already stored parts are skipped, so a retry resumes. Fatal problems fail the run. Called by mail_route before the business sequence.'
+responseTimeout: 3600
+↓init [steps.SimpleStep-1791379959608]: 
+  comment: Prepares get_doc.
+  expression: |
+    _use_docid = String(docid);
+    store_error = "";
+    meta_status = "";
+↓get_doc [steps.TransactionStep-1791379959610]: 
+  comment: Loads the mail document (attachments metadata, uid, uidValidity, _rev).
+  sourceTransaction: lib_MailListener.maillistener.get_document
+  ↓_use_docid [variables.StepVariable-1791379959612]: 
+    description: From the JavaScript scope (init)
+↓read_doc [steps.JsonSourceStep-1791380000982]: 
+  comment: Mail document as a JS object (CouchDB error object when missing).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791379959610
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output
+  variableName: mail_doc
+↓download [steps.SimpleStep-1791380001001]: 
+  comment: Fetches the message again by UID and writes each pending attachment to a temp file (upload_list).
+  expression: |
+    '// Downloads the attachments of a routed mail from IMAP (message found again by UID, UIDVALIDITY checked) into
+    // temp files for the put loop. Attachments already stored are skipped (retry after a failure); a part bigger than
+    // max_mb is not kept and is listed with skipped = "too_large". Fatal problems go to store_error.
+    var imapHost = "${lib_maillistener.imap.host=imap.gmail.com}";
+    var imapPort = "${lib_maillistener.imap.port=993}";
+    var imapUser = "${lib_maillistener.imap.user=changeme}";
+    var imapFolder = "${lib_maillistener.imap.folder=INBOX}";
+    var imapPassword = String(imap_password || "");
+    var maxMb = Number(max_mb);
+    if (!(maxMb > 0)) {
+      maxMb = 500;
+    }
+    var maxBytes = maxMb * 1024 * 1024;
+    
+    var doc = (mail_doc != null && !mail_doc.error) ? mail_doc : null;
+    doc_found = doc != null;
+    attachments_meta = (doc && doc.attachments) ? doc.attachments : [];
+    upload_list = [];
+    current_rev = doc ? String(doc._rev) : "";
+    var pending = [];
+    for (var p = 0; p < attachments_meta.length; p++) {
+      if (attachments_meta[p].stored !== true) { pending.push(p); }
+    }
+    
+    var store = null;
+    var inbox = null;
+    try {
+      if (doc == null) {
+        throw new Error("mail document " + docid + " not found");
+      }
+      if (pending.length > 0) {
+        if (imapPassword == "") {
+          throw new Error("IMAP password not configured: define the lib_maillistener.imap.password.secret symbol");
+        }
+        var props = new java.util.Properties();
+        props.put("mail.store.protocol", "imaps");
+        props.put("mail.imaps.host", imapHost);
+        props.put("mail.imaps.port", imapPort);
+        props.put("mail.imaps.ssl.enable", "true");
+        props.put("mail.imaps.ssl.protocols", "TLSv1.2 TLSv1.3");
+        props.put("mail.imaps.ssl.checkserveridentity", "true");
+        store = javax.mail.Session.getInstance(props, null).getStore("imaps");
+        store.connect(imapHost, Number(imapPort), imapUser, imapPassword);
+        inbox = store.getFolder(imapFolder);
+        inbox.open(javax.mail.Folder.READ_ONLY);
+        if (doc.uidValidity && String(doc.uidValidity) != String(inbox.getUIDValidity())) {
+          throw new Error("mailbox renumbered since the mail was stored (UIDVALIDITY changed): attachments no longer reachable");
+        }
+        var message = inbox.getMessageByUID(Number(doc.uid));
+        if (message == null) {
+          throw new Error("message UID " + doc.uid + " no longer in " + imapFolder);
+        }
+        // Same walk and classification as extractContent in mail_poll.fetch_mails, so indexes match the metadata
+        var parts = [];
+        var walk = function (part) {
+          var disposition = String(part.getDisposition() || "").toLowerCase();
+          var fileName = "";
+          try {
+            fileName = part.getFileName() ? String(javax.mail.internet.MimeUtility.decodeText(part.getFileName())) : "";
+          } catch (e) {
+            fileName = String(part.getFileName() || "");
+          }
+          if (part.isMimeType("multipart/*")) {
+            var multipart = part.getContent();
+            for (var k = 0; k < multipart.getCount(); k++) { walk(multipart.getBodyPart(k)); }
+          } else if (disposition == "attachment" || fileName != "" || part.isMimeType("message/rfc822")) {
+            parts.push(part);
+          }
+        };
+        walk(message);
+        if (parts.length != attachments_meta.length) {
+          throw new Error("attachment list changed on the server (" + parts.length + " parts, " + attachments_meta.length + " expected)");
+        }
+        var buffer = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 65536);
+        for (var q = 0; q < pending.length; q++) {
+          var index = pending[q];
+          var meta = attachments_meta[index];
+          var part = parts[index];
+          // getSize() is the encoded (base64) size: skip without downloading when the decoded file is surely too big
+          if (Number(part.getSize()) * 0.73 > maxBytes) {
+            meta.skipped = "too_large";
+            continue;
+          }
+          var file = java.io.File.createTempFile("maillistener-", ".att");
+          file.deleteOnExit();
+          var input = part.getInputStream();
+          var output = new java.io.FileOutputStream(file);
+          var total = 0;
+          var tooLarge = false;
+          try {
+            var read;
+            while ((read = input.read(buffer)) != -1) {
+              total += read;
+              if (total > maxBytes) { tooLarge = true; break; }
+              output.write(buffer, 0, read);
+            }
+          } finally {
+            try { output.close(); } catch (e) {}
+            try { input.close(); } catch (e) {}
+          }
+          if (tooLarge) {
+            file["delete"]();
+            meta.skipped = "too_large";
+            continue;
+          }
+          delete meta.skipped;
+          upload_list.push({
+            index: index,
+            storedName: (index + 1) + "-" + String(meta.name || "attachment").replace(/[^A-Za-z0-9._-]+/g, "_"),
+            path: String(file.getAbsolutePath()),
+            contentType: String(meta.contentType || "application/octet-stream"),
+            bytes: total
+          });
+        }
+      }
+    } catch (e) {
+      store_error = String(e && e.message ? e.message : e);
+      for (var u = 0; u < upload_list.length; u++) {
+        try { new java.io.File(upload_list[u].path)["delete"](); } catch (e2) {}
+      }
+      upload_list = [];
+    } finally {
+      try { if (inbox && inbox.isOpen()) { inbox.close(false); } } catch (e) {}
+      try { if (store) { store.close(); } } catch (e) {}
+    }'
+↓foreach_upload [steps.SimpleIteratorStep-1791380001011]: 
+  comment: Uploads each downloaded file (item = {index, storedName, path, contentType, bytes}).
+  expression: upload_list
+  ↓prepare_put [steps.SimpleStep-1791380001013]: 
+    comment: Exposes the put_attachment variables.
+    expression: |
+      // One PUT per attachment; each successful PUT returns the revision needed by the next one.
+      _use_docid = String(docid);
+      _use_rev = current_rev;
+      _use_attname = item.storedName;
+      _use_attpath = item.path;
+      _use_attcontent_type = item.contentType;
+      put_status = "";
+      put_rev = "";
+  ↓put [steps.TransactionStep-1791380001015]: 
+    comment: Uploads the temp file as a CouchDB attachment.
+    sourceTransaction: lib_MailListener.maillistener.put_attachment
+    ↓_use_docid [variables.StepVariable-1791380001017]: 
+      description: From the JavaScript scope (prepare_put)
+    ↓_use_rev [variables.StepVariable-1791380001019]: 
+      description: From the JavaScript scope (prepare_put)
+    ↓_use_attname [variables.StepVariable-1791380001021]: 
+      description: From the JavaScript scope (prepare_put)
+    ↓_use_attpath [variables.StepVariable-1791380001023]: 
+      description: From the JavaScript scope (prepare_put)
+    ↓_use_attcontent_type [variables.StepVariable-1791380001025]: 
+      description: From the JavaScript scope (prepare_put)
+  ↓read_put_status [steps.SimpleSourceStep-1791380027816]: 
+    comment: HTTP status of the upload.
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791380001015
+          - java.lang.String: 
+            - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+    variableName: put_status
+  ↓read_put_rev [steps.SimpleSourceStep-1791380027842]: 
+    comment: New document revision after the upload.
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791380001015
+          - java.lang.String: 
+            - ↑value: ./document/couchdb_output/rev/text()
+    variableName: put_rev
+  ↓after_put [steps.SimpleStep-1791380027860]: 
+    comment: Deletes the temp file and records the outcome.
+    expression: |
+      '// The temp file is removed whatever happened; a failed upload makes the run fail (mail_replay retries it).
+      try { new java.io.File(item.path)["delete"](); } catch (e) {}
+      if (/^20[12]$/.test(String(put_status))) {
+        current_rev = String(put_rev);
+        attachments_meta[item.index].stored = true;
+        attachments_meta[item.index].storedName = item.storedName;
+        attachments_meta[item.index].storedBytes = item.bytes;
+      } else if (store_error == "") {
+        store_error = "upload of " + item.storedName + " failed, HTTP status " + put_status;
+      }'
+↓prepare_meta [steps.SimpleStep-1791380001030]: 
+  comment: Builds the attachments metadata update and the summary.
+  expression: |
+    '// Records which attachments are stored; the files themselves are in the document _attachments, under storedName.
+    var storedCount = 0;
+    var skippedCount = 0;
+    for (var m = 0; m < attachments_meta.length; m++) {
+      if (attachments_meta[m].stored === true) {
+        storedCount++;
+      } else if (attachments_meta[m].skipped) {
+        skippedCount++;
+      }
+    }
+    attachments_status = attachments_meta.length == 0 ? "none"
+      : (store_error != "" ? "error" : (storedCount == attachments_meta.length ? "stored" : "partial"));
+    has_attachment_meta = doc_found && attachments_meta.length > 0;
+    _id = String(docid);
+    _use_json_base = JSON.stringify({ attachments: attachments_meta, attachmentsStatus: attachments_status });
+    meta_status = "";
+    store_summary = { docid: String(docid), attachments: attachments_meta.length, stored: storedCount, skipped: skippedCount, status: attachments_status, error: store_error != "" ? store_error : null };'
+↓if_has_attachments [steps.IfStep-1791380001040]: 
+  comment: Writes the metadata only for an existing mail with attachments.
+  condition: has_attachment_meta
+  ↓update_meta [steps.TransactionStep-1791380001043]: 
+    comment: Merges attachments / attachmentsStatus (the attachments array is replaced).
+    sourceTransaction: lib_MailListener.maillistener.update_document
+    ↓_id [variables.StepVariable-1791380001045]: 
+      description: From the JavaScript scope (prepare_meta)
+    ↓_use_json_base [variables.StepVariable-1791380001047]: 
+      description: From the JavaScript scope (prepare_meta)
+  ↓read_meta_status [steps.SimpleSourceStep-1791380027875]: 
+    comment: HTTP status of the metadata update.
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791380001043
+          - java.lang.String: 
+            - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+    variableName: meta_status
+↓check [steps.SimpleStep-1791380001056]: 
+  comment: Fails the run on fatal problems so mail_route marks the mail as error.
+  expression: |
+    '// Fatal problems fail the run: mail_route then marks the mail as error and mail_replay retries it later.
+    if (has_attachment_meta && !/^20[12]$/.test(String(meta_status))) {
+      store_error = (store_error != "" ? store_error + " | " : "") + "metadata update failed, HTTP status " + meta_status;
+    }
+    if (store_error != "") {
+      throw new Error(store_error);
+    }'
+↓result [steps.JsonToXmlStep-1791380001063]: 
+  comment: Public summary.
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: store_summary
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
+↓docid [variables.RequestableVariable-1791379959602]: 
+  description: Mail document id (mail-<uid>)
+↓imap_password [variables.RequestableVariable-1791379959604]: 
+  description: 'IMAP password (Gmail: app password), provided by the lib_maillistener.imap.password.secret symbol'
+  value: 
+    - ↑traceable: false
+    - →→: ${lib_maillistener.imap.password.secret=}
+  visibility: 7
+↓max_mb [variables.RequestableVariable-1791379959606]: 
+  description: Maximum size of one attachment file in MB (decimals allowed); invalid or non-positive value means 500
+  value: ${lib_maillistener.attachments.max_mb=500}

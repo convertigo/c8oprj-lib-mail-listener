@@ -1,5 +1,6 @@
 accessibility: Private
-comment: 'Routes a stored mail document to a business sequence based on rules, then writes status/route/routedAt back on the document. Input: docid (mail-<uid>). V1 rules: rule_urgent (subject contains URGENT), rule_domain (sender domain). No match: status unmatched.'
+comment: 'Routes a stored mail document to a business sequence based on rules, then writes status/route/routedAt/attempts/error back on the document. Input: docid (mail-<uid>). V1 rules: rule_urgent (subject contains URGENT, any sender), rule_domain (DMARC-authenticated sender from convertigo.com, exact domain). A matched mail first gets its attachment files stored (mail_store_attachments), then the business sequence runs. No match: unmatched (attachments not stored). Attachment or business failure: error, retried by mail_replay.'
+responseTimeout: 3600
 ↓inputVars [steps.InputVariablesStep-1791304583584]: 
   comment: Exposes the sequence input variables (docid) as XML so later steps can source them.
 ↓get_mail [steps.TransactionStep-1791303053796]: 
@@ -58,6 +59,39 @@ comment: 'Routes a stored mail document to a business sequence based on rules, t
         - java.lang.String: 
           - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
   variableName: mail_http_status
+↓src_from_address [steps.SimpleSourceStep-1791306431646]: 
+  comment: Extracts the bare sender address (never the display name).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791303053796
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/fromAddress/text()
+  variableName: from_address_var
+↓src_sender_verified [steps.SimpleSourceStep-1791306431654]: 
+  comment: Extracts the sender authenticity verdict computed by mail_ingest.
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791303053796
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/senderVerified/text()
+  variableName: sender_verified_var
+↓src_attempts [steps.SimpleSourceStep-1791307086322]: 
+  comment: Routing attempts already made on this mail (absent = 0).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791303053796
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/attempts/text()
+  variableName: attempts_var
 ↓read_mail_fields [steps.SimpleStep-1791303057423]: 
   comment: Checks the mail exists and decides the route (V1 rules). Sets route_var and status_var.
   expression: |
@@ -65,23 +99,50 @@ comment: 'Routes a stored mail document to a business sequence based on rules, t
     if (String(mail_http_status) != "200") {
       throw new Error("Mail document " + docid + " not found (HTTP " + mail_http_status + ")");
     }
-    var from = String(from_var);
     var subject = String(subject_var);
     var body = String(body_var);
+    // Sender identity: the bare address (never the display name) and the DMARC verdict computed by mail_ingest
+    var fromAddress = (typeof from_address_var == "undefined" || from_address_var == null) ? "" : String(from_address_var).toLowerCase();
+    var fromDomain = fromAddress.substring(fromAddress.lastIndexOf("@") + 1);
+    var senderVerified = typeof sender_verified_var != "undefined" && String(sender_verified_var) == "true";
+    // Attempts so far (mail_replay retries until max_attempts); the attachment and business calls fill the *_error vars
+    mail_attempts = Number(typeof attempts_var == "undefined" ? 0 : attempts_var) || 0;
+    attachments_error = "";
+    business_error_message = "";
+    business_error_details = "";
     var decided = "";
-    // Rule 1: subject contains URGENT
+    // Rule 1: subject contains URGENT (content rule: any sender can trigger it)
     if (subject.toUpperCase().indexOf("URGENT") >= 0) {
       decided = "rule_urgent";
     }
-    // Rule 2: sender from a given domain (example: convertigo.com)
-    else if (from.indexOf("@convertigo.com") >= 0) {
+    // Rule 2: authenticated sender from a given domain (example: convertigo.com), exact domain match
+    else if (senderVerified && fromDomain == "convertigo.com") {
       decided = "rule_domain";
     }
     route_var = decided;
     status_var = (decided === "") ? "unmatched" : "routed";'
+↓if_store_attachments [steps.IfStep-1791380027906]: 
+  comment: A matched mail gets its attachment files stored before the business sequence runs.
+  condition: route_var != ""
+  ↓call_store_attachments [steps.SequenceStep-1791380027908]: 
+    comment: Stores the attachment files (no-op without attachments or when already stored).
+    sourceSequence: lib_MailListener.mail_store_attachments
+    ↓docid [variables.StepVariable-1791380027910]: 
+      description: From the JavaScript scope (mail_route docid)
+  ↓src_attachments_error [steps.SimpleSourceStep-1791380045664]: 
+    comment: Error raised by mail_store_attachments (null when it succeeded).
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791380027908
+          - java.lang.String: 
+            - ↑value: ./document/error/details/text()
+    variableName: attachments_error
 ↓is_rule_urgent [steps.IfThenElseStep-1791303110548]: 
-  comment: 'Dispatch rule 1: subject contains URGENT.'
-  condition: route_var == "rule_urgent"
+  comment: 'Dispatch rule 1: subject contains URGENT (only once the attachments are stored).'
+  condition: route_var == "rule_urgent" && String(attachments_error || "") == ""
   ↓then_urgent [steps.ThenStep-1791303115347]: 
     ↓call_business_urgent [steps.SequenceStep-1791303119501]: 
       comment: Calls the demo business sequence for rule_urgent.
@@ -97,9 +158,31 @@ comment: 'Routes a stored mail document to a business sequence based on rules, t
                 - ↑value: ./docid/text()
       ↓route [variables.StepVariable-1791303123754]: 
         value: rule_urgent
+    ↓src_urgent_error_message [steps.SimpleSourceStep-1791307086343]: 
+      comment: Error raised by the business sequence (exception or XMLErrorStep), null when it succeeded.
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1791303119501
+            - java.lang.String: 
+              - ↑value: ./document/error/message/text()
+      variableName: business_error_message
+    ↓src_urgent_error_details [steps.SimpleSourceStep-1791307086353]: 
+      comment: Error details from the business sequence.
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1791303119501
+            - java.lang.String: 
+              - ↑value: ./document/error/details/text()
+      variableName: business_error_details
 ↓is_rule_domain [steps.IfStep-1791305848723]: 
-  comment: 'Dispatch rule 2: sender domain.'
-  condition: route_var == "rule_domain"
+  comment: 'Dispatch rule 2: sender domain (only once the attachments are stored).'
+  condition: route_var == "rule_domain" && String(attachments_error || "") == ""
   ↓call_business_domain [steps.SequenceStep-1791305848725]: 
     comment: Calls the demo business sequence for rule_domain.
     sourceSequence: lib_MailListener.demo_business
@@ -114,12 +197,54 @@ comment: 'Routes a stored mail document to a business sequence based on rules, t
               - ↑value: ./docid/text()
     ↓route [variables.StepVariable-1791305848729]: 
       value: rule_domain
+  ↓src_domain_error_message [steps.SimpleSourceStep-1791307086362]: 
+    comment: Error raised by the business sequence (exception or XMLErrorStep), null when it succeeded.
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791305848725
+          - java.lang.String: 
+            - ↑value: ./document/error/message/text()
+    variableName: business_error_message
+  ↓src_domain_error_details [steps.SimpleSourceStep-1791307086368]: 
+    comment: Error details from the business sequence.
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791305848725
+          - java.lang.String: 
+            - ↑value: ./document/error/details/text()
+    variableName: business_error_details
 ↓prepare_status [steps.SimpleStep-1791305848732]: 
-  comment: Builds the status update for update_status.
+  comment: Builds the status update for update_status (error when the business sequence failed).
   expression: |
     '// Persists the routing decision on the mail document; the merge policy keeps the stored mail fields.
+    // Attachment storage failure or business sequence failure (exception or XMLErrorStep) is not absorbed:
+    // the mail becomes status error for mail_replay (the business sequence is not called without its attachments).
+    var attachmentsError = String(attachments_error || "");
+    var businessMessage = String(business_error_message || "");
+    var businessDetails = String(business_error_details || "");
+    if (attachmentsError != "") {
+      status_var = "error";
+      error_var = ("attachments: " + attachmentsError).substring(0, 2000);
+    } else if (businessMessage != "" || businessDetails != "") {
+      status_var = "error";
+      error_var = (businessMessage + (businessDetails != "" ? " | " + businessDetails : "")).substring(0, 2000);
+    } else {
+      error_var = null;
+    }
     _id = String(docid);
-    _use_json_base = JSON.stringify({ status: status_var, route: route_var, routedAt: new Date().toISOString() });
+    _use_json_base = JSON.stringify({
+      status: status_var,
+      route: route_var,
+      routedAt: new Date().toISOString(),
+      attempts: mail_attempts + 1,
+      error: error_var
+    });
     status_save_status = "";'
 ↓update_status [steps.TransactionStep-1791305848743]: 
   comment: Merges status/route/routedAt into the mail document.
@@ -146,7 +271,7 @@ comment: 'Routes a stored mail document to a business sequence based on rules, t
     if (!/^20[12]$/.test(String(status_save_status))) {
       throw new Error("Status update failed for " + docid + ", HTTP status " + status_save_status);
     }
-    route_summary = { docid: String(docid), route: route_var, status: status_var };'
+    route_summary = { docid: String(docid), route: route_var, status: status_var, attempts: mail_attempts + 1, error: error_var };'
 ↓result [steps.JsonToXmlStep-1791305897283]: 
   comment: 'Public summary: docid, route, status.'
   jsonObject: 

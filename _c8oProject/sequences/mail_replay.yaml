@@ -1,0 +1,87 @@
+accessibility: Private
+comment: Retries mails left pending (interrupted run) or in error (business sequence failure) through mail_route, until max_attempts routing attempts. store_error mails are not retried. Called by mail_poll under its lock; callable alone in Studio.
+responseTimeout: 3600
+↓find [steps.TransactionStep-1791307158976]: 
+  comment: Loads the pending / error mails (50 at most per run).
+  sourceTransaction: lib_MailListener.maillistener.find_retry_candidates
+↓read_candidates [steps.JsonSourceStep-1791307190981]: 
+  comment: Candidate documents as a JS array (null when none).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791307158976
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/docs
+  variableName: candidates
+↓select [steps.SimpleStep-1791307190989]: 
+  comment: Keeps the candidates below max_attempts.
+  expression: |
+    '// Retries mails left pending (interrupted run) or in error (business failure) until max_attempts is reached.
+    var maxAttempts = Math.max(1, Number(max_attempts) || 3);
+    var found = candidates || [];
+    retry_list = [];
+    replay_stats = { candidates: found.length, retried: 0, routed: 0, unmatched: 0, errors: 0, skippedMaxAttempts: 0, retriedIds: [], errorIds: [] };
+    for (var c = 0; c < found.length; c++) {
+      if ((Number(found[c].attempts) || 0) < maxAttempts) {
+        retry_list.push(String(found[c]._id));
+      } else {
+        replay_stats.skippedMaxAttempts++;
+      }
+    }'
+↓foreach_retry [steps.SimpleIteratorStep-1791307191002]: 
+  comment: Routes each retained mail again (item = docid).
+  expression: retry_list
+  ↓set_docid [steps.SimpleStep-1791307191004]: 
+    comment: Exposes docid for call_route.
+    expression: |
+      docid = String(item);
+      replay_stats.retried++;
+      replay_stats.retriedIds.push(docid);
+      replayed_status = "";
+  ↓call_route [steps.SequenceStep-1791307191006]: 
+    comment: Routes the mail again (attempts is incremented by mail_route).
+    sourceSequence: lib_MailListener.mail_route
+    ↓docid [variables.StepVariable-1791307191008]: 
+      description: From the JavaScript scope (set_docid)
+  ↓read_route_status [steps.SimpleSourceStep-1791307205111]: 
+    comment: Status written by mail_route (null when mail_route itself failed).
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791307191006
+          - java.lang.String: 
+            - ↑value: ./document/result/status/text()
+    variableName: replayed_status
+  ↓count [steps.SimpleStep-1791307205136]: 
+    comment: Counts the outcome of the retry.
+    expression: |
+      'var outcome = String(replayed_status || "");
+      if (outcome == "routed") {
+        replay_stats.routed++;
+      } else if (outcome == "unmatched") {
+        replay_stats.unmatched++;
+      } else {
+        replay_stats.errors++;
+        replay_stats.errorIds.push(docid);
+      }'
+↓result [steps.JsonToXmlStep-1791307205150]: 
+  comment: Public summary of the replay.
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: replay_stats
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
+↓max_attempts [variables.RequestableVariable-1791307158974]: 
+  description: Maximum routing attempts per mail before it is left in error for a manual look
+  value: 3

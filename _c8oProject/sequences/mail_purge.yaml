@@ -1,0 +1,95 @@
+accessibility: Private
+comment: 'Retention: deletes mail documents (any status) stored more than retention_days ago (lib_maillistener.retention_days, default 30), 200 per run. state-inbox is never touched. Called by mail_poll under its lock; callable alone in Studio.'
+↓compute_cutoff [steps.SimpleStep-1791376393468]: 
+  comment: Builds the cutoff date and the Mango selector for find.
+  expression: |
+    '// Retention: mail documents (any status) stored more than retention_days ago are deleted; state-inbox is never
+    // touched. Documents written before storedAt existed fall back to receivedAt. Invalid or non-positive value: 30.
+    purge_retention_days = Number(retention_days);
+    if (!(purge_retention_days > 0)) {
+      purge_retention_days = 30;
+    }
+    purge_cutoff = new Date(Date.now() - purge_retention_days * 86400000).toISOString();
+    _use_selector = JSON.stringify({
+      type: "mail",
+      "$or": [
+        { storedAt: { "$lt": purge_cutoff } },
+        { storedAt: { "$exists": false }, receivedAt: { "$lt": purge_cutoff } }
+      ]
+    });'
+↓find [steps.TransactionStep-1791376393471]: 
+  comment: Expired mail documents (_id, _rev), 200 at most per run.
+  sourceTransaction: lib_MailListener.maillistener.find_expired
+  ↓_use_selector [variables.StepVariable-1791376393473]: 
+    description: From the JavaScript scope (compute_cutoff)
+↓read_expired [steps.JsonSourceStep-1791376420157]: 
+  comment: Expired documents as a JS array (null when none).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791376393471
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/docs
+  variableName: expired
+↓prepare_delete [steps.SimpleStep-1791376420168]: 
+  comment: Builds the bulk deletion and the summary.
+  expression: |
+    '// Builds the bulk deletion of the expired documents (CouchDB keeps an empty tombstone per deleted document).
+    var found = expired || [];
+    purge_stats = { retentionDays: purge_retention_days, cutoff: purge_cutoff, expired: found.length, deleted: 0, failed: 0, hasMore: found.length >= 200, failedIds: [] };
+    var deletions = [];
+    for (var i = 0; i < found.length; i++) {
+      deletions.push({ _id: String(found[i]._id), _rev: String(found[i]._rev), _deleted: true });
+    }
+    _use_json_base = JSON.stringify(deletions);
+    has_expired = deletions.length > 0;'
+↓if_expired [steps.IfStep-1791376393475]: 
+  comment: Deletes only when something expired.
+  condition: has_expired
+  ↓delete [steps.TransactionStep-1791376393477]: 
+    comment: 'Bulk deletion (_deleted: true): CouchDB keeps only an empty tombstone.'
+    sourceTransaction: lib_MailListener.maillistener.delete_documents
+    ↓_use_json_base [variables.StepVariable-1791376393479]: 
+      description: From the JavaScript scope (prepare_delete)
+  ↓read_deleted [steps.JsonSourceStep-1791376420175]: 
+    comment: Per-document results of the bulk deletion.
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791376393477
+          - java.lang.String: 
+            - ↑value: ./document/couchdb_output/items
+    variableName: deleted_items
+  ↓count [steps.SimpleStep-1791376420183]: 
+    comment: Counts deleted and failed documents.
+    expression: |
+      'var results = deleted_items || [];
+      for (var r = 0; r < results.length; r++) {
+        if (String(results[r].ok) == "true") {
+          purge_stats.deleted++;
+        } else {
+          purge_stats.failed++;
+          purge_stats.failedIds.push(String(results[r].id));
+        }
+      }'
+↓result [steps.JsonToXmlStep-1791376393481]: 
+  comment: Public summary of the purge.
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: purge_stats
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
+↓retention_days [variables.RequestableVariable-1791376393464]: 
+  description: Days a mail document is kept (decimals allowed); invalid or non-positive value means 30
+  value: ${lib_maillistener.retention_days=30}

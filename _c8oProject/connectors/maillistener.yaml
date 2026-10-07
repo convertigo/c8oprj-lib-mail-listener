@@ -1,4 +1,20 @@
 databaseName: maillistener
+↓delete_documents [transactions.couchdb.PostBulkDocumentsTransaction]: 
+  comment: 'Bulk write used by mail_purge to delete documents: _use_json_base is an array of {_id, _rev, _deleted: true}.'
+  ↓_use_json_base [variables.RequestableVariable-1791376317139]: 
+    description: 'JSON array of {_id, _rev, _deleted: true}'
+↓find_expired [transactions.couchdb.PostFindTransaction]: 
+  comment: 'Mango query for mail_purge: mail documents older than the retention (selector built by mail_purge and passed in _use_selector). The default selector matches nothing.'
+  p_fields: '["_id", "_rev"]'
+  p_limit: 200
+  p_selector: '({ type: "mail", storedAt: { "$lt": "" } })'
+  ↓_use_selector [variables.RequestableVariable-1791376317043]: 
+    description: Mango selector (JSON) built by mail_purge
+↓find_retry_candidates [transactions.couchdb.PostFindTransaction]: 
+  comment: 'Mango query: mails left pending (interrupted run) or in error (business sequence failure), for mail_replay.'
+  p_fields: '["_id", "status", "attempts"]'
+  p_limit: 50
+  p_selector: '({ type: "mail", status: { "$in": ["pending", "error"] } })'
 ↓get_document [transactions.couchdb.GetDocumentTransaction]: 
   ↓_use_docid [variables.RequestableVariable-1791302852607]: 
     description: Document id
@@ -21,8 +37,23 @@ databaseName: maillistener
   ↓_use_json_base [variables.RequestableVariable-1791302884335]: 
     description: JSON used as a base for the document
 ↓put_attachment [transactions.couchdb.PutDocumentAttachmentTransaction]: 
+  comment: Uploads one attachment file (temp file written from the IMAP part) onto a mail document. Requires the current _rev.
+  responseTimeout: 1800
+  ↓_use_docid [variables.RequestableVariable-1791379804807]: 
+    description: Document id
+  ↓_use_rev [variables.RequestableVariable-1791379804810]: 
+    description: Current document revision
+  ↓_use_attname [variables.RequestableVariable-1791379804812]: 
+    description: Attachment name
+  ↓_use_attpath [variables.RequestableVariable-1791379804814]: 
+    description: Absolute path of the file to upload
+  ↓_use_attbase64 [variables.RequestableVariable-1791379804816]: 
+    description: Base64 content (used only when no path is given)
+  ↓_use_attcontent_type [variables.RequestableVariable-1791379804818]: 
+    description: Content type returned when the attachment is read
 ↓update_document [transactions.couchdb.PostDocumentTransaction]: 
-  comment: Updates an existing document by merging the posted fields (state-inbox cursor, mail status). post_document keeps policy none so creating an existing mail-<uid> stays a 409 (dedup).
+  comment: Updates an existing document by merging the posted fields (state-inbox cursor, mail status, attachment metadata). The attachments array is replaced, not merged (p_merge). CouchDB attachments (_attachments) are kept. post_document keeps policy none so creating an existing mail-<uid> stays a 409 (dedup).
+  p_merge: '{"attachments":"override"}'
   policy: merge
   ↓_id [variables.RequestableVariable-1791305813265]: 
     description: Document id (mail-<imapUID> or state-inbox)
@@ -44,3 +75,13 @@ databaseName: maillistener
           }
         }
       }'
+↓by_type_status [couchdb.JsonIndex]: 
+  comment: Index for find_retry_candidates (type + status).
+  fields: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: type
+        - java.lang.String: 
+          - ↑value: status

@@ -1,5 +1,6 @@
 accessibility: Private
-comment: Polls the IMAP inbox for mails with uid > state.lastUid (at most max_per_poll per run) and hands the batch to mail_ingest, which stores, routes and commits the cursor. First run (or UIDVALIDITY change) starts from the current UIDNEXT. Scheduled outside the project (administration console).
+comment: Scheduled entry point. Takes the state-inbox lock (skips when another run is live), polls the IMAP inbox for mails with uid > lastUid (at most max_per_poll), hands the batch to mail_ingest (store, route, cursor), retries pending / error mails with mail_replay, purges mail documents older than the retention with mail_purge, then releases the lock and records lastError. First run (or UIDVALIDITY change) starts from the current UIDNEXT. Scheduled outside the project (administration console).
+responseTimeout: 3600
 ↓get_state [steps.TransactionStep-1791302911098]: 
   comment: Reads the state-inbox document (lastUid cursor + running lock).
   sourceTransaction: lib_MailListener.maillistener.get_document
@@ -27,20 +28,156 @@ comment: Polls the IMAP inbox for mails with uid > state.lastUid (at most max_pe
         - java.lang.String: 
           - ↑value: ./document/couchdb_output/uidValidity/text()
   variableName: uidValidityVar
+↓read_state [steps.JsonSourceStep-1791307362410]: 
+  comment: Whole state-inbox document as a JS object (CouchDB error object when it does not exist yet).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791302911098
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output
+  variableName: state_doc
+↓prepare_lock [steps.SimpleStep-1791307362423]: 
+  comment: Decides whether a live run holds the lock and builds the compare-and-set lock document.
+  expression: |
+    '// Anti-overlap lock on state-inbox (running + runningSince), taken with a compare-and-set write: post_document with
+    // the current _rev. A concurrent run gets a 409 and skips; a lock older than lock_ttl_minutes is stale and taken over.
+    var state = (state_doc != null && !state_doc.error) ? state_doc : {};
+    var lockTtlMs = Math.max(1, Number(lock_ttl_minutes) || 15) * 60000;
+    var lockedSince = Date.parse(String(state.runningSince || "")) || 0;
+    lock_busy = String(state.running) == "true" && (Date.now() - lockedSince) < lockTtlMs;
+    lock_holder_since = String(state.runningSince || "");
+    lock_status = "";
+    ingest_error = "";
+    replay_error = "";
+    purge_error = "";
+    var lockDoc = {};
+    for (var key in state) {
+      if (key != "_c8oMeta" && key != "_id") { lockDoc[key] = state[key]; }
+    }
+    lockDoc.type = "state";
+    lockDoc.running = true;
+    lockDoc.runningSince = new Date().toISOString();
+    _id = "state-inbox";
+    _use_json_base = JSON.stringify(lockDoc);'
+↓if_lock_busy [steps.IfStep-1791307362435]: 
+  comment: 'Another run is in progress: skip this one.'
+  condition: lock_busy
+  ↓skipped_busy [steps.JsonToXmlStep-1791307362437]: 
+    comment: Skip summary.
+    jsonObject: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+        - SmartType: 
+          - ↑mode: JS
+          - →→: '({ skipped: true, reason: "another run holds the lock since " + lock_holder_since })'
+    key: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+        - SmartType: 
+          - ↑mode: PLAIN
+          - →→: result
+  ↓return_busy [steps.ReturnStep-1791307362439]: 
+↓acquire_lock [steps.TransactionStep-1791307362450]: 
+  comment: 'Compare-and-set write of the lock (policy none + _rev): 409 when a concurrent run got it first.'
+  sourceTransaction: lib_MailListener.maillistener.post_document
+  ↓_id [variables.StepVariable-1791307362452]: 
+    description: From the JavaScript scope (prepare_lock)
+  ↓_use_json_base [variables.StepVariable-1791307362454]: 
+    description: From the JavaScript scope (prepare_lock)
+↓read_lock_status [steps.SimpleSourceStep-1791307395808]: 
+  comment: HTTP status of the lock write (201 taken, 409 lost to a concurrent run).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791307362450
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+  variableName: lock_status
+↓if_lock_lost [steps.IfStep-1791307395823]: 
+  comment: 'A concurrent run took the lock between the read and the write: skip this one.'
+  condition: '!/^20[12]$/.test(String(lock_status))'
+  ↓skipped_lost [steps.JsonToXmlStep-1791307395825]: 
+    comment: Skip summary.
+    jsonObject: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+        - SmartType: 
+          - ↑mode: JS
+          - →→: '({ skipped: true, reason: "lock taken by a concurrent run (HTTP " + lock_status + ")" })'
+    key: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+        - SmartType: 
+          - ↑mode: PLAIN
+          - →→: result
+  ↓return_lost [steps.ReturnStep-1791307395827]: 
 ↓fetch_mails [steps.SimpleStep-1791302907429]: 
-  comment: Connects to the IMAP mailbox, fetches mails with uid > lastUid (capped by max_per_poll), extracts from/subject/body/attachments and exposes mails, last_uid, uid_next, uid_validity, has_more for call_ingest. IMAP errors fail the run.
+  comment: Connects to the IMAP mailbox, fetches mails with uid > lastUid (capped by max_per_poll), extracts sender, Authentication-Results, subject, body (text/plain, else text/html as text, capped) and attachment metadata, and exposes mails, last_uid, uid_next, uid_validity, has_more for call_ingest. Failures go to fetch_error.
   expression: |
     '// IMAP fetch (engine-embedded javax.mail). Reads the stored cursor (lastUidVar, uidValidityVar) and hands
     // mails / last_uid / uid_next / uid_validity / has_more to the call_ingest step variables.
     // First run (no cursor yet) or UIDVALIDITY change: start from now instead of replaying the mailbox history.
-    var imapHost = "${imap.host=imap.gmail.com}";
-    var imapPort = "${imap.port=993}";
-    var imapUser = "${imap.user=changeme}";
-    var imapPassword = "${imap.password=changeme}";
-    var imapFolder = "${imap.folder=INBOX}";
+    // Any failure is kept in fetch_error so mail_poll releases its lock and records lastError before failing.
+    var imapHost = "${lib_maillistener.imap.host=imap.gmail.com}";
+    var imapPort = "${lib_maillistener.imap.port=993}";
+    var imapUser = "${lib_maillistener.imap.user=changeme}";
+    var imapFolder = "${lib_maillistener.imap.folder=INBOX}";
+    // The password comes from the masked imap_password variable, never from this source
+    var imapPassword = String(imap_password || "");
     var maxPerPoll = Math.max(1, Number(max_per_poll) || 50);
+    var maxBodyChars = 200000;
     var storedLastUid = Number(typeof lastUidVar == "undefined" ? 0 : lastUidVar) || 0;
     var storedUidValidity = (typeof uidValidityVar == "undefined" || uidValidityVar == null) ? "" : String(uidValidityVar);
+    
+    // MIME walk: the first text/plain part is the body, text/html is the fallback (tags stripped); parts with a file
+    // name, an attachment disposition or an embedded message are listed as attachments (metadata only, not stored).
+    function extractContent(message, maxChars) {
+      var text = null;
+      var html = null;
+      var attachments = [];
+      var walk = function (part) {
+        var disposition = String(part.getDisposition() || "").toLowerCase();
+        var fileName = "";
+        try {
+          fileName = part.getFileName() ? String(javax.mail.internet.MimeUtility.decodeText(part.getFileName())) : "";
+        } catch (e) {
+          fileName = String(part.getFileName() || "");
+        }
+        if (part.isMimeType("multipart/*")) {
+          var multipart = part.getContent();
+          for (var k = 0; k < multipart.getCount(); k++) { walk(multipart.getBodyPart(k)); }
+        } else if (disposition == "attachment" || fileName != "" || part.isMimeType("message/rfc822")) {
+          attachments.push({
+            name: fileName != "" ? fileName : "part-" + (attachments.length + 1),
+            contentType: String(part.getContentType() || "").split(";")[0].trim().toLowerCase(),
+            size: Number(part.getSize())
+          });
+        } else if (text == null && part.isMimeType("text/plain")) {
+          try { text = String(part.getContent()); } catch (e) {}
+        } else if (html == null && part.isMimeType("text/html")) {
+          try { html = String(part.getContent()); } catch (e) {}
+        }
+      };
+      walk(message);
+      var body = "";
+      if (text != null) {
+        body = text;
+      } else if (html != null) {
+        body = html.replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
+          .replace(/<br\s*\/?>|<\/(p|div|li|tr|h[1-6])>/gi, "\n")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/&nbsp;/gi, " ").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">")
+          .replace(/&quot;/gi, "\"").replace(/&#39;/g, "''").replace(/&amp;/gi, "&")
+          .replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
+      }
+      var truncated = body.length > maxChars;
+      return { body: truncated ? body.substring(0, maxChars) : body, bodyTruncated: truncated, attachments: attachments };
+    }
     
     var fetched = [];
     var initialize = false;
@@ -49,7 +186,11 @@ comment: Polls the IMAP inbox for mails with uid > state.lastUid (at most max_pe
     var uidValidity = "";
     var store = null;
     var inbox = null;
+    fetch_error = "";
     try {
+      if (imapPassword == "") {
+        throw new Error("IMAP password not configured: define the lib_maillistener.imap.password.secret symbol");
+      }
       var props = new java.util.Properties();
       props.put("mail.store.protocol", "imaps");
       props.put("mail.imaps.host", imapHost);
@@ -73,44 +214,43 @@ comment: Polls the IMAP inbox for mails with uid > state.lastUid (at most max_pe
           var uid = Number(inbox.getUID(m));
           if (uid < fromUid) { continue; }
           if (fetched.length >= maxPerPoll) { moreLeft = true; break; }
+          // from keeps the display form for traceability; fromAddresses holds the bare addresses used by the rules
           var from = "";
-          try { var fa = m.getFrom(); if (fa && fa.length > 0) { from = String(fa[0]); } } catch (e) {}
+          var fromAddresses = [];
+          try {
+            var fa = m.getFrom();
+            if (fa && fa.length > 0) {
+              from = String(fa[0]);
+              for (var a = 0; a < fa.length; a++) {
+                if (typeof fa[a].getAddress == "function") { fromAddresses.push(String(fa[a].getAddress())); }
+              }
+            }
+          } catch (e) {}
+          // Topmost Authentication-Results header only: the one added by our receiving server (checked in mail_ingest)
+          var authResults = "";
+          try { var arh = m.getHeader("Authentication-Results"); if (arh && arh.length > 0) { authResults = String(arh[0]); } } catch (e) {}
           var subject = "";
           try { subject = String(m.getSubject()); } catch (e) {}
           var receivedAt = "";
           try { var d = m.getReceivedDate(); if (d) { receivedAt = new Date(d.getTime()).toISOString(); } } catch (e) {}
-          var body = "";
-          var attachments = [];
-          try {
-            var content = m.getContent();
-            if (content && typeof content === "object" && content instanceof javax.mail.Multipart) {
-              var parts = content.getCount();
-              for (var p = 0; p < parts; p++) {
-                var bp = content.getBodyPart(p);
-                var disp = String(bp.getDisposition() || "");
-                var mime = String(bp.getContentType() || "");
-                if (disp == "ATTACHMENT" || (mime.indexOf("attachment") >= 0)) {
-                  var fn = String(bp.getFileName() || ("attachment_" + p));
-                  attachments.push(fn);
-                } else if (mime.indexOf("text/plain") === 0) {
-                  body = String(bp.getContent());
-                }
-              }
-            } else if (typeof content === "string") {
-              body = content;
-            }
-          } catch (e) { body = ""; }
+          var content = { body: "", bodyTruncated: false, attachments: [] };
+          try { content = extractContent(m, maxBodyChars); } catch (e) {}
           fetched.push({
             uid: uid,
             mailbox: imapUser,
             from: from,
+            fromAddresses: fromAddresses,
+            authResults: authResults,
             subject: subject,
-            body: body,
+            body: content.body,
+            bodyTruncated: content.bodyTruncated,
             receivedAt: receivedAt,
-            attachments: attachments
+            attachments: content.attachments
           });
         }
       }
+    } catch (e) {
+      fetch_error = String(e && e.message ? e.message : e);
     } finally {
       try { if (inbox && inbox.isOpen()) { inbox.close(false); } } catch (e) {}
       try { if (store) { store.close(); } } catch (e) {}
@@ -121,20 +261,115 @@ comment: Polls the IMAP inbox for mails with uid > state.lastUid (at most max_pe
     uid_next = String(uidNext);
     uid_validity = uidValidity;
     has_more = String(moreLeft);'
-↓call_ingest [steps.SequenceStep-1791305897374]: 
-  comment: Stores, routes and commits the cursor for the fetched batch.
+↓if_fetch_ok [steps.IfStep-1791307362463]: 
+  comment: Ingest and replay only when the IMAP fetch succeeded.
+  condition: fetch_error == ""
+  ↓call_ingest [steps.SequenceStep-1791307362465]: 
+    comment: Stores, routes and commits the cursor for the fetched batch.
+    output: true
+    sourceSequence: lib_MailListener.mail_ingest
+    ↓mails [variables.StepVariable-1791307362467]: 
+      description: From the JavaScript scope (fetch_mails)
+    ↓last_uid [variables.StepVariable-1791307362469]: 
+      description: From the JavaScript scope (fetch_mails)
+    ↓uid_next [variables.StepVariable-1791307362471]: 
+      description: From the JavaScript scope (fetch_mails)
+    ↓uid_validity [variables.StepVariable-1791307362473]: 
+      description: From the JavaScript scope (fetch_mails)
+    ↓has_more [variables.StepVariable-1791307362475]: 
+      description: From the JavaScript scope (fetch_mails)
+  ↓src_ingest_error [steps.SimpleSourceStep-1791307395833]: 
+    comment: Error raised by mail_ingest (null when it succeeded).
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791307362465
+          - java.lang.String: 
+            - ↑value: ./document/error/details/text()
+    variableName: ingest_error
+  ↓call_replay [steps.SequenceStep-1791307362477]: 
+    comment: Retries pending / error mails while the lock is held.
+    output: true
+    sourceSequence: lib_MailListener.mail_replay
+  ↓src_replay_error [steps.SimpleSourceStep-1791307395840]: 
+    comment: Error raised by mail_replay (null when it succeeded).
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791307362477
+          - java.lang.String: 
+            - ↑value: ./document/error/details/text()
+    variableName: replay_error
+↓call_purge [steps.SequenceStep-1791376420190]: 
+  comment: Retention purge (runs even when the IMAP fetch failed).
   output: true
-  sourceSequence: lib_MailListener.mail_ingest
-  ↓mails [variables.StepVariable-1791305897376]: 
-    description: From the JavaScript scope (fetch_mails)
-  ↓last_uid [variables.StepVariable-1791305897378]: 
-    description: From the JavaScript scope (fetch_mails)
-  ↓uid_next [variables.StepVariable-1791305897380]: 
-    description: From the JavaScript scope (fetch_mails)
-  ↓uid_validity [variables.StepVariable-1791305897382]: 
-    description: From the JavaScript scope (fetch_mails)
-  ↓has_more [variables.StepVariable-1791305897384]: 
-    description: From the JavaScript scope (fetch_mails)
+  sourceSequence: lib_MailListener.mail_purge
+↓src_purge_error [steps.SimpleSourceStep-1791376431922]: 
+  comment: Error raised by mail_purge (null when it succeeded).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791376420190
+        - java.lang.String: 
+          - ↑value: ./document/error/details/text()
+  variableName: purge_error
+↓prepare_release [steps.SimpleStep-1791307362479]: 
+  comment: Builds the lock release with the outcome of the run.
+  expression: |
+    '// Releases the lock and records the outcome of the run in state-inbox (lastError is empty when everything went fine).
+    var runErrors = [];
+    if (String(fetch_error || "") != "") { runErrors.push("fetch: " + fetch_error); }
+    if (String(ingest_error || "") != "") { runErrors.push("ingest: " + ingest_error); }
+    if (String(replay_error || "") != "") { runErrors.push("replay: " + replay_error); }
+    if (String(purge_error || "") != "") { runErrors.push("purge: " + purge_error); }
+    run_error = runErrors.join(" | ").substring(0, 2000);
+    _id = "state-inbox";
+    _use_json_base = JSON.stringify({ running: false, runningSince: "", lastRunAt: new Date().toISOString(), lastError: run_error });
+    release_status = "";'
+↓release_lock [steps.TransactionStep-1791307362484]: 
+  comment: Merges running=false and lastError into state-inbox.
+  sourceTransaction: lib_MailListener.maillistener.update_document
+  ↓_id [variables.StepVariable-1791307362486]: 
+    description: From the JavaScript scope (prepare_release)
+  ↓_use_json_base [variables.StepVariable-1791307362488]: 
+    description: From the JavaScript scope (prepare_release)
+↓read_release_status [steps.SimpleSourceStep-1791307395853]: 
+  comment: HTTP status of the lock release.
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791307362484
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+  variableName: release_status
+↓check_run [steps.SimpleStep-1791307362491]: 
+  comment: Fails the run (visible in the Scheduler log) once the lock is released.
+  expression: |
+    '// Surface failures to the caller (Scheduler log) only after the lock is released.
+    if (!/^20[12]$/.test(String(release_status))) {
+      run_error = (run_error != "" ? run_error + " | " : "") + "lock release failed, HTTP status " + release_status;
+    }
+    if (run_error != "") {
+      throw new Error(run_error);
+    }'
 ↓max_per_poll [variables.RequestableVariable-1791305897339]: 
   description: Maximum number of mails fetched per run; the rest is picked up by the next run
   value: 50
+↓imap_password [variables.RequestableVariable-1791306431620]: 
+  comment: Masked in logs, Studio and platform. The project file only holds the symbol reference; the secret itself lives in the engine symbol lib_maillistener.imap.password.secret (stored ciphered thanks to the .secret suffix).
+  description: 'IMAP password (Gmail: app password), provided by the lib_maillistener.imap.password.secret symbol'
+  value: 
+    - ↑traceable: false
+    - →→: ${lib_maillistener.imap.password.secret=}
+  visibility: 7
+↓lock_ttl_minutes [variables.RequestableVariable-1791307362391]: 
+  description: A lock older than this (crashed run) is considered stale and taken over; keep it above the longest expected run (large attachments)
+  value: 60

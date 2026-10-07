@@ -1,5 +1,6 @@
 accessibility: Private
-comment: Stores a batch of fetched mails as mail-<uid> documents (409 = already stored), routes each new one through mail_route, then commits the state-inbox cursor. The cursor only advances over mails that are actually stored. Called by mail_poll; callable alone in Studio with a synthetic batch.
+comment: Stores a batch of fetched mails as mail-<uid> documents (409 = already stored; rejected document = minimal store_error trace), routes each new one through mail_route, then commits the state-inbox cursor. The cursor only advances over mails that are stored or traced. Called by mail_poll under its lock; callable alone in Studio with a synthetic batch.
+responseTimeout: 3600
 ↓prepare [steps.SimpleStep-1791305813287]: 
   comment: Parses the batch and initialises the cursor bookkeeping.
   expression: |
@@ -8,30 +9,54 @@ comment: Stores a batch of fetched mails as mail-<uid> documents (409 = already 
     mail_list.sort(function (a, b) { return a.uid - b.uid; });
     cursor_uid = Number(last_uid) || 0;
     cursor_blocked = false;
-    ingest_stats = { fetched: mail_list.length, saved: 0, duplicates: 0, failed: 0, savedIds: [], failedIds: [] };'
+    ingest_stats = { fetched: mail_list.length, saved: 0, duplicates: 0, storeErrors: 0, failed: 0, savedIds: [], storeErrorIds: [], failedIds: [] };'
 ↓foreach_mail [steps.SimpleIteratorStep-1791305813289]: 
   comment: Iterates over the batch (item = current mail).
   expression: mail_list
   ↓prepare_save [steps.SimpleStep-1791305813291]: 
-    comment: Builds the mail-<uid> document for save_mail.
+    comment: Verifies the sender and builds the mail-<uid> document for save_mail.
     expression: |
-      '// Builds the mail-<uid> document; the save_mail step variables pick _id and _use_json_base from this scope.
+      '// Sender authenticity: trust only the topmost Authentication-Results header written by our own receiving server
+      // (authserv-id) and require DMARC pass for the domain of a single From address.
+      var authServId = "${lib_maillistener.imap.authserv_id=mx.google.com}".toLowerCase();
+      var fromAddresses = item.fromAddresses || [];
+      var fromAddress = fromAddresses.length == 1 ? String(fromAddresses[0]).toLowerCase() : "";
+      var fromDomain = fromAddress.substring(fromAddress.lastIndexOf("@") + 1);
+      var authResults = String(item.authResults || "").replace(/\s+/g, " ");
+      var senderVerified = false;
+      if (fromAddress != "" && authServId != "" && authResults.split(";")[0].trim().toLowerCase() == authServId) {
+        var dmarc = /\bdmarc=pass\b[^;]*\bheader\.from=([^\s;]+)/i.exec(authResults);
+        senderVerified = dmarc != null && dmarc[1].toLowerCase() == fromDomain;
+      }
+      var attachmentList = item.attachments || [];
+      
+      // Builds the mail-<uid> document; the save_mail step variables pick _id and _use_json_base from this scope.
+      // uidValidity lets mail_store_attachments find the message again; attachment files are stored only once routed.
       _id = "mail-" + item.uid;
       _use_json_base = JSON.stringify({
         type: "mail",
         uid: item.uid,
+        uidValidity: uid_validity == null ? "" : String(uid_validity),
         mailbox: item.mailbox,
         from: item.from,
+        fromAddress: fromAddress,
+        senderVerified: senderVerified,
+        authResults: authResults,
         subject: item.subject,
         body: item.body,
+        bodyTruncated: item.bodyTruncated === true,
         receivedAt: item.receivedAt,
-        attachments: item.attachments,
+        storedAt: new Date().toISOString(),
+        attachments: attachmentList,
+        attachmentsStatus: attachmentList.length > 0 ? "not_stored" : "none",
         status: "pending",
         route: "",
         routedAt: "",
+        attempts: 0,
         error: null
       });
-      save_status = "";'
+      save_status = "";
+      stub_status = "";'
   ↓save_mail [steps.TransactionStep-1791305813293]: 
     comment: 'Creates mail-<uid> with status=pending (policy none: an existing document answers 409).'
     sourceTransaction: lib_MailListener.maillistener.post_document
@@ -50,16 +75,63 @@ comment: Stores a batch of fetched mails as mail-<uid> documents (409 = already 
           - java.lang.String: 
             - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
     variableName: save_status
+  ↓if_save_failed [steps.IfStep-1791307158901]: 
+    comment: 'The full document was rejected (not created, not already stored): keep a minimal trace instead.'
+    condition: '!/^(201|202|409)$/.test(String(save_status))'
+    ↓prepare_stub [steps.SimpleStep-1791307158903]: 
+      comment: Builds the minimal store_error document.
+      expression: |
+        '// The full document was rejected (too large, invalid content...): store a minimal trace with status store_error
+        // so the cursor can move on. mail_replay does not retry it (the content is gone): it needs a manual look.
+        _id = "mail-" + item.uid;
+        _use_json_base = JSON.stringify({
+          type: "mail",
+          uid: item.uid,
+          mailbox: item.mailbox,
+          from: String(item.from || "").substring(0, 500),
+          subject: String(item.subject || "").substring(0, 500),
+          receivedAt: item.receivedAt,
+          storedAt: new Date().toISOString(),
+          status: "store_error",
+          route: "",
+          routedAt: "",
+          attempts: 0,
+          error: "Full document rejected by the database (HTTP " + save_status + ")"
+        });'
+    ↓save_stub [steps.TransactionStep-1791307158905]: 
+      comment: Creates the minimal mail-<uid> document.
+      sourceTransaction: lib_MailListener.maillistener.post_document
+      ↓_id [variables.StepVariable-1791307158907]: 
+        description: From the JavaScript scope (prepare_stub)
+      ↓_use_json_base [variables.StepVariable-1791307158909]: 
+        description: From the JavaScript scope (prepare_stub)
+    ↓read_stub_status [steps.SimpleSourceStep-1791307190959]: 
+      comment: HTTP status of the minimal store_error document.
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1791307158905
+            - java.lang.String: 
+              - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+      variableName: stub_status
   ↓track [steps.SimpleStep-1791305848638]: 
-    comment: Counts the outcome, advances the cursor while every mail so far is stored, decides whether to route.
+    comment: Counts the outcome, advances the cursor while every mail so far is stored or traced, decides whether to route.
     expression: |
-      '// Advances the cursor only while every mail so far is stored (201/202 created, 409 already stored by a previous poll).
+      '// Advances the cursor only while every mail so far is stored: 201/202 created, 409 already stored by a previous
+      // poll, or rejected but traced as store_error. Anything else (database down...) blocks the cursor for a retry.
       var saveCode = String(save_status);
-      if (saveCode == "201" || saveCode == "202") {
+      var stubCode = String(stub_status || "");
+      var created = saveCode == "201" || saveCode == "202";
+      if (created) {
         ingest_stats.saved++;
         ingest_stats.savedIds.push(_id);
       } else if (saveCode == "409") {
         ingest_stats.duplicates++;
+      } else if (stubCode == "201" || stubCode == "202") {
+        ingest_stats.storeErrors++;
+        ingest_stats.storeErrorIds.push(_id);
       } else {
         ingest_stats.failed++;
         ingest_stats.failedIds.push(_id);
@@ -69,7 +141,7 @@ comment: Stores a batch of fetched mails as mail-<uid> documents (409 = already 
         cursor_uid = Math.max(cursor_uid, Number(item.uid));
       }
       docid = _id;
-      route_needed = saveCode == "201" || saveCode == "202";'
+      route_needed = created;'
   ↓if_new_mail [steps.IfStep-1791305848658]: 
     comment: Only a mail stored by this poll is routed; a 409 means it was already handled.
     condition: route_needed
@@ -82,6 +154,7 @@ comment: Stores a batch of fetched mails as mail-<uid> documents (409 = already 
   comment: Finalises the cursor and builds the state-inbox update.
   expression: |
     '// Nothing left on the server and no failure: jump to uid_next - 1 so UID gaps are not fetched again.
+    // The running flag (anti-overlap lock) belongs to mail_poll and is not touched here.
     if (!cursor_blocked && String(has_more) != "true" && Number(uid_next) > 0) {
       cursor_uid = Math.max(cursor_uid, Number(uid_next) - 1);
     }
@@ -90,8 +163,7 @@ comment: Stores a batch of fetched mails as mail-<uid> documents (409 = already 
       type: "state",
       lastUid: cursor_uid,
       uidValidity: uid_validity == null ? "" : String(uid_validity),
-      lastPollAt: new Date().toISOString(),
-      running: false
+      lastPollAt: new Date().toISOString()
     });
     state_save_status = "";'
 ↓update_state [steps.TransactionStep-1791305813301]: 
@@ -125,8 +197,10 @@ comment: Stores a batch of fetched mails as mail-<uid> documents (409 = already 
       fetched: ingest_stats.fetched,
       saved: ingest_stats.saved,
       duplicates: ingest_stats.duplicates,
+      storeErrors: ingest_stats.storeErrors,
       failed: ingest_stats.failed,
       savedIds: ingest_stats.savedIds,
+      storeErrorIds: ingest_stats.storeErrorIds,
       failedIds: ingest_stats.failedIds
     };'
 ↓result [steps.JsonToXmlStep-1791305848688]: 
@@ -144,7 +218,7 @@ comment: Stores a batch of fetched mails as mail-<uid> documents (409 = already 
         - ↑mode: PLAIN
         - →→: result
 ↓mails [variables.RequestableVariable-1791305813277]: 
-  description: 'JSON array of mails: [{uid, mailbox, from, subject, body, receivedAt, attachments}]'
+  description: 'JSON array of mails: [{uid, mailbox, from, fromAddresses, authResults, subject, body, receivedAt, attachments}]'
 ↓last_uid [variables.RequestableVariable-1791305813279]: 
   description: Cursor before this batch (highest UID already handled)
 ↓uid_next [variables.RequestableVariable-1791305813281]: 
