@@ -1,7 +1,7 @@
 
 # ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/core/images/project_color_16x16.png?raw=true "Project") lib_MailListener
 
-Mail listener library for Convertigo: it polls an IMAP mailbox, stores every new mail in the FullSync database `maillistener`, routes it to business sequences with rules, stores the attachment files of routed mails, keeps a full trace (status, errors, retries) and purges old mails.
+Mail listener library for Convertigo: it polls an IMAP mailbox, stores every new mail in the FullSync database `maillistener`, routes it with rules to a configurable business sequence, stores the attachment files of routed mails, keeps a full trace (status, errors, retries) and purges old mails.
 
 ## How it works
 
@@ -31,7 +31,17 @@ Define them in the administration console (Symbols), then reload the project.
 | `lib_maillistener.retention_days` | `30` | Mail documents (any status, with their attachment files) stored longer than this are deleted. Decimals allowed; an invalid or non-positive value means 30. |
 | `lib_maillistener.attachments.max_mb` | `500` | Maximum size of one stored attachment file. Bigger files are listed as skipped (`too_large`). Note: Gmail refuses incoming mails above 25 MB. |
 
-Run options (variables of `mail_poll`, can be set on the Scheduler job): `max_per_poll` (default 50), `lock_ttl_minutes` (default 60). `mail_replay`: `max_attempts` (default 3).
+## Run options
+
+Variables of `mail_poll`, set them on the Scheduler job:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `business_sequence` | `lib_MailListener.demo_business` | Business sequence called for every matched mail, as `project.sequence`. It can be a sequence of any project loaded in the engine. |
+| `max_per_poll` | `50` | Mails fetched per run; the rest is picked up by the next run. |
+| `lock_ttl_minutes` | `60` | Age after which a lock is considered left by a crashed run. |
+
+`mail_replay` also has `max_attempts` (default 3).
 
 ## Routing
 
@@ -43,6 +53,8 @@ Run options (variables of `mail_poll`, can be set on the Scheduler job): `max_pe
 | `rule_domain` | The sender is verified and its address domain is exactly `convertigo.com`. |
 
 Sender verification is done once, by `mail_ingest`: the mail must have a single From address, the topmost `Authentication-Results` header must come from `lib_maillistener.imap.authserv_id`, and it must report `dmarc=pass` for the From domain. The result is stored in `fromAddress` and `senderVerified`; the display name is never used. A content rule such as `rule_urgent` can be triggered by anyone: do not attach sensitive actions to it without checking `senderVerified`.
+
+To add a route, add a condition in `read_mail_fields` that sets `decided = "rule_x"`. Nothing else is needed: every route goes to the business sequence with its name.
 
 Outcome written on the mail document (`status`, `route`, `routedAt`, `attempts`, `error`):
 
@@ -56,15 +68,17 @@ Outcome written on the mail document (`status`, `route`, `routedAt`, `attempts`,
 For a matched route, `mail_route`:
 
 1. stores the attachment files (`mail_store_attachments`): the message is fetched again from IMAP by UID and each file becomes a CouchDB attachment of `mail-<uid>`, named `<index>-<safe name>` (`attachments[i].storedName`; the original name stays in `attachments[i].name`). If this fails, the business sequence is not called and the mail goes to `error`;
-2. calls the business sequence with a Call Sequence step (`call_business_urgent`, `call_business_domain`), synchronously, inside the `mail_poll` run, with two variables: `docid` (`mail-<uid>`) and `route`;
-3. writes the status. If the business sequence throws an exception or returns an error structure (`XMLErrorStep`), the mail goes to `error` with the message and the business sequence is called again by `mail_replay`. A business sequence must therefore be idempotent, and quick (it runs inside the polling run and its lock).
+2. calls the sequence named by `business_sequence` (passed from `mail_poll` through `mail_ingest` / `mail_replay`), synchronously, inside the polling run, with two variables: `docid` (`mail-<uid>`) and `route` (the matched route name, to branch on). Technically, the `call_business` Call Sequence step keeps `demo_business` as design-time target and its `__project` / `__sequence` step variables redirect the call at runtime;
+3. writes the status. The mail goes to `error`, and `mail_replay` calls the business sequence again later, when the business sequence throws an exception or returns an error structure (`XMLErrorStep`), when the sequence does not exist in the project, or when the project is not loaded ("could not be called"). A business sequence must therefore be idempotent, and quick (it runs inside the polling run and its lock).
 
-The business sequence reads the mail with `lib_MailListener.maillistener.get_document` (`_use_docid` = `docid`): `from`, `fromAddress`, `senderVerified`, `subject`, `body`, `bodyTruncated`, `receivedAt`, `attachments`. Attachment files are read with a GetDocumentAttachment transaction on the `maillistener` connector (document `docid`, attachment name `storedName`).
+Business sequence contract:
 
-`demo_business` is a placeholder. To plug your own logic:
+- input variables: `docid` and `route`;
+- read the mail with `lib_MailListener.maillistener.get_document` (`_use_docid` = `docid`; a project calling it needs a reference to `lib_MailListener`): `from`, `fromAddress`, `senderVerified`, `subject`, `body`, `bodyTruncated`, `receivedAt`, `attachments`;
+- read attachment files with a GetDocumentAttachment transaction on the `maillistener` connector (document `docid`, attachment name `storedName`);
+- report a failure by throwing or with an `XMLErrorStep`.
 
-- change an existing route: point its Call Sequence step to your sequence (a sequence of another loaded project can be targeted; add a project reference to it);
-- add a route: add a condition in `read_mail_fields` that sets `decided = "rule_x"`, then copy the `is_rule_domain` step (jIf `route_var == "rule_x" && String(attachments_error || "") == ""`, its Call Sequence step and its two error sources) and point it to your sequence.
+`demo_business` is a placeholder: set `business_sequence` to your own sequence, for example `myProject.process_mail`.
 
 ## Data
 
@@ -420,12 +434,12 @@ Placeholder transaction that intentionally cancels execution
 <details><summary><span style="color:DarkGoldenRod"><i>Sequences</i></span></summary><blockquote><p>
 
 
-<details><summary><b>demo_business</b> : Demo business sequence called by mail_route</summary><blockquote><p>
+<details><summary><b>demo_business</b> : Placeholder business sequence, default value of the business_sequence variable of mail_poll</summary><blockquote><p>
 
 
 ## ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/sequences/images/genericsequence_color_16x16.png?raw=true "GenericSequence") demo_business
 
-Demo business sequence called by mail_route. Replace with real business sequences in consumer projects.
+Placeholder business sequence, default value of the business_sequence variable of mail_poll. Receives docid (mail-<uid>) and route. Replace it by setting business_sequence to your own sequence (project.sequence).
 
 <span style="color:DarkGoldenRod">Variables</span>
 
@@ -475,6 +489,14 @@ name
 <th>
 comment
 </th>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;business_sequence
+</td>
+<td>
+
+</td>
 </tr>
 <tr>
 <td>
@@ -537,6 +559,14 @@ name
 <th>
 comment
 </th>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;business_sequence
+</td>
+<td>
+
+</td>
 </tr>
 <tr>
 <td>
@@ -616,6 +646,14 @@ comment
 </tr>
 <tr>
 <td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;business_sequence
+</td>
+<td>
+
+</td>
+</tr>
+<tr>
+<td>
 <img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;max_attempts
 </td>
 <td>
@@ -626,12 +664,12 @@ comment
 
 </p></blockquote></details>
 
-<details><summary><b>mail_route</b> : Routes a stored mail document to a business sequence based on rules, then writes status/route/routedAt/attempts/error back on the document</summary><blockquote><p>
+<details><summary><b>mail_route</b> : Routes a stored mail document based on rules, then writes status/route/routedAt/attempts/error back on the document</summary><blockquote><p>
 
 
 ## ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/sequences/images/genericsequence_color_16x16.png?raw=true "GenericSequence") mail_route
 
-Routes a stored mail document to a business sequence based on rules, then writes status/route/routedAt/attempts/error back on the document. Input: docid (mail-<uid>). V1 rules: rule_urgent (subject contains URGENT, any sender), rule_domain (DMARC-authenticated sender from convertigo.com, exact domain). A matched mail first gets its attachment files stored (mail_store_attachments), then the business sequence runs. No match: unmatched (attachments not stored). Attachment or business failure: error, retried by mail_replay.
+Routes a stored mail document based on rules, then writes status/route/routedAt/attempts/error back on the document. Input: docid (mail-<uid>), business_sequence (project.sequence, default lib_MailListener.demo_business). V1 rules: rule_urgent (subject contains URGENT, any sender), rule_domain (DMARC-authenticated sender from convertigo.com, exact domain). A matched mail first gets its attachment files stored (mail_store_attachments), then business_sequence is called with docid and route. No match: unmatched (attachments not stored). Attachment or business failure: error, retried by mail_replay.
 
 <span style="color:DarkGoldenRod">Variables</span>
 
@@ -643,6 +681,14 @@ name
 <th>
 comment
 </th>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;business_sequence
+</td>
+<td>
+
+</td>
 </tr>
 <tr>
 <td>
