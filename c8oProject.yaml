@@ -1,4 +1,4 @@
-↑convertigo: 8.3.0.m006
+↑convertigo: 8.4.0.m006
 ↓lib_MailListener [core.Project]: 
   comment: |
     'Mail listener library for Convertigo: it polls an IMAP mailbox, stores every new mail in the FullSync database `maillistener`, routes it with rules to a configurable business sequence, stores the attachment files of routed mails, keeps a full trace (status, errors, retries) and purges old mails.
@@ -12,7 +12,7 @@
     3. `mail_ingest` stores each mail as a `mail-<uid>` document (status `pending`), routes each new one through `mail_route`, then moves the cursor forward over the mails actually stored;
     4. `mail_replay` retries the mails left `pending` or in `error` (up to `max_attempts`);
     5. `mail_purge` deletes the mail documents older than the retention;
-    6. releases the lock and writes `lastRunAt` / `lastError` in `state-inbox`. The run fails (visible in the Scheduler log) when something failed.
+    6. releases the lock, writes `lastRunAt` / `lastError` in `state-inbox`, logs a one-line summary and returns the run summary (see below). The run fails (visible in the Scheduler log, with the one-line summary as message) when something failed.
     
     The mailbox is opened read-only: mails are neither flagged as read nor moved.
     
@@ -42,6 +42,27 @@
     | `lock_ttl_minutes` | `60` | Age after which a lock is considered left by a crashed run. |
     
     `mail_replay` also has `max_attempts` (default 3).
+    
+    ## Run summary
+    
+    `mail_poll` returns one `result` object per run and writes its `summary` line in the engine log (Context logger, INFO level), for example `mail_poll ok: 3 mails read (1 routed, 1 unmatched, 1 already stored); replay: 1 retried (1 routed, 0 unmatched, 0 in error); 2.4 s`. The log line holds counts and errors only, never a sender or a subject.
+    
+    | Field | Content |
+    |---|---|
+    | `status` | `ok`, `failed`, or `skipped` when another run holds the lock (`reason` says why). |
+    | `summary` | The one-line summary; it starts with `FAILED:` and the errors when the run failed. |
+    | `startedAt`, `finishedAt`, `durationMs` | Run timing. |
+    | `businessSequence` | Business sequence used by the run. |
+    | `mailbox` | `account`, `folder`, `uidValidity`, `uidNext`, `cursorBefore` / `cursorAfter` (last handled UID), `firstRun`, `hasMore` (mails left for the next run). |
+    | `counts` | `read`, then the number of read mails per outcome: `routed`, `unmatched`, `error`, `pending`, `alreadyStored`, `storeError`, `notSaved`. |
+    | `mails` | One line per mail read: `uid`, `docid`, `receivedAt`, `from` (bare address), `senderVerified`, `subject` (80 characters), `attachments` (count), `status`, `route`, `error`. Never the body. |
+    | `replay` | `candidates`, `retried`, `routed`, `unmatched`, `errors`, `skippedMaxAttempts` (mails left in `error` after `max_attempts`), and one line per retried mail: `docid`, `from`, `senderVerified`, `subject`, `status`, `route`, `attempts`, `error`. |
+    | `purge` | `retentionDays`, `cutoff`, `expired`, `deleted`, `failed`, `hasMore`. |
+    | `errors` | Run errors, prefixed by their stage (`fetch:`, `ingest:`, `replay:`, `purge:`, lock release). |
+    
+    Status of a mail read: `routed`, `unmatched` or `error` as written on the mail document (see Routing); `pending` when `mail_route` itself failed (`mail_replay` retries it); `already_stored` when a previous run had stored it already; `store_error` when the database rejected the full mail (minimal trace kept); `not_saved` when it could not be saved at all (the cursor stays before it and the next run reads it again).
+    
+    A failed run ends with an exception so that the Scheduler shows it: the engine then returns the error instead of the `result` object, and the error message is the `summary` line.
     
     ## Routing
     
@@ -84,15 +105,14 @@
     
     The NGX application of the project is an admin page that lists the stored mails, newest first, 25 per page: subject (shortened to 80 characters), sender, reception date, routing status (coloured pill) and route, and a paperclip with the number of attachments when the mail has some. One checkbox per routing status, with its count, filters the list; Previous / Next buttons page through it and Refresh reloads the current page.
     
-    The page loads through the shared action `LoadMailsPage`, which calls the Private sequence `admin_list_mails` (variables `page`, `page_size` (max 100), `statuses`: comma-separated, empty = all). On a server engine a Private sequence only answers a browser session already logged into the Convertigo administration console: log into the console first, then open the application (`.../convertigo/projects/lib_MailListener/DisplayObjects/mobile/`) in the same browser. Otherwise the page shows "Unable to load the mails". In the Studio, Private sequences are callable without login (development only). The list reads at most 10 000 mail documents; a note is shown when that limit is reached.
+    The page loads through the shared action `LoadMailsPage`, which calls `admin_list_mails` (variables `page`, `page_size` (max 100), `statuses`: comma-separated, empty = all). That sequence only answers a browser session logged into the Convertigo administration console as an administrator (WEB_ADMIN role). It checks the session itself: Private alone is not enough, because the Studio lets anyone run Private sequences and a server lets any console user with the test platform role run them. Log into the console first, then open the application in the same browser (`.../convertigo/projects/lib_MailListener/DisplayObjects/mobile/` on a server, the viewer URL in the Studio). Anybody else gets "Access denied" (error code 403) and no data. The list reads at most 10 000 mail documents; a note is shown when that limit is reached.
     
     ## Data
     
     Database `maillistener` (FullSync connector): one `mail-<uid>` document per mail (sender, subject, body up to 200 000 characters, attachment metadata and files, routing status) and the `state-inbox` document (cursor, UIDVALIDITY, lock, last run, last error). All sequences are Private: only `mail_poll` is meant to be scheduled, the others are called by it (or by the admin page) and can be run alone from the Studio.'
   contextTimeout: 59
-  corsOrigin: =Origin
   httpSessionTimeout: 60
-  version: 1.0.2
+  version: 1.0.3
   ↓maillistener [connectors.FullSyncConnector]: 🗏 connectors/maillistener.yaml
   ↓void [connectors.SqlConnector]: 🗏 connectors/void.yaml
   ↓admin_list_mails [sequences.GenericSequence]: 🗏 sequences/admin_list_mails.yaml

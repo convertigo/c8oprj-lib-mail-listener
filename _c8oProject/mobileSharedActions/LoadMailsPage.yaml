@@ -26,7 +26,7 @@ exposed: false
           '{
            "ionBean": "SetLocalAction",
            "Property": "plain:errorMessage",
-           "Value": "script:''Unable to load the mails. Open this page in a browser session logged into the Convertigo administration console.''"
+           "Value": "script:String(out?.error?.message || out?.message || ''Unable to load the mails. Log into the Convertigo administration console as an administrator, then reload this page.'')"
           }'
       ↓FailError [ngx.components.UIDynamicAction-1791384306132]: 
         beanData: |
@@ -63,20 +63,28 @@ exposed: false
         '{
          "ionBean": "SetLocalAction",
          "Property": "plain:results",
-         "Value": "script:{items: [].concat(out?.result?.items || []), total: Number(out?.result?.total || 0), page: Number(out?.result?.page || 1), pageCount: Number(out?.result?.pageCount || 1), first: Number(out?.result?.first || 0), last: Number(out?.result?.last || 0), all: Number(out?.result?.all || 0), capped: String(out?.result?.capped) == ''true'', statusCounts: [].concat(out?.result?.statusCounts || [])}"
+         "Value": "script:out?.error ? {items: [], total: 0, page: 1, pageCount: 1, first: 0, last: 0, all: 0, capped: false, statusCounts: []} : {items: [].concat(out?.result?.items || []), total: Number(out?.result?.total || 0), page: Number(out?.result?.page || 1), pageCount: Number(out?.result?.pageCount || 1), first: Number(out?.result?.first || 0), last: Number(out?.result?.last || 0), all: Number(out?.result?.all || 0), capped: String(out?.result?.capped) == ''true'', statusCounts: [].concat(out?.result?.statusCounts || [])}"
         }'
-      comment: Normalised list contract
-    ↓ClearError [ngx.components.UIDynamicAction-1791384306138]: 
-      beanData: |
-        '{
-         "ionBean": "SetLocalAction",
-         "Property": "plain:error",
-         "Value": "script:false"
-        }'
+      comment: Normalised list contract (empty when the sequence answers with an error, e.g. access denied)
     ↓StopLoading [ngx.components.UIDynamicAction-1791384306140]: 
       beanData: |
         '{
          "ionBean": "SetLocalAction",
          "Property": "plain:loading",
          "Value": "script:false"
+        }'
+    ↓SetErrorState [ngx.components.UIDynamicAction-1791385148571]: 
+      beanData: |
+        '{
+         "ionBean": "SetLocalAction",
+         "Property": "plain:error",
+         "Value": "script:!!out?.error"
+        }'
+      comment: Error structure returned by the sequence (403 when not an administrator)
+    ↓SetErrorText [ngx.components.UIDynamicAction-1791385149053]: 
+      beanData: |
+        '{
+         "ionBean": "SetLocalAction",
+         "Property": "plain:errorMessage",
+         "Value": "script:out?.error ? String(out.error.message || ''Access denied.'') : ''''"
         }'

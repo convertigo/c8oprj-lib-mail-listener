@@ -75,15 +75,20 @@ Business sequence contract:
 
 - input variables: `docid` and `route`;
 - read the mail with `lib_MailListener.maillistener.get_document` (`_use_docid` = `docid`; a project calling it needs a reference to `lib_MailListener`): `from`, `fromAddress`, `senderVerified`, `subject`, `body`, `bodyTruncated`, `receivedAt`, `attachments`;
-- read attachment files with a GetDocumentAttachment transaction on the `maillistener` connector (document `docid`, attachment name `storedName`);
-- report a failure by throwing or with an `XMLErrorStep`.
+- read an attachment file with `lib_MailListener.maillistener.get_attachment` (`_use_docid` = `docid`, `_use_attname` = `attachments[i].storedName`, only for `stored: true` entries). Without `_use_attpath` the file comes back in `couchdb_output/data`: text types as text, binary types as base64; keep that for small files. With `_use_attpath` the file is written to that path;
+- report a failure by throwing or with an `XMLErrorStep` (then stop the sequence with a Return step).
 
-`demo_business` is a placeholder: set `business_sequence` to your own sequence, for example `myProject.process_mail`.
+`demo_business` is the reference implementation of this contract: it reads the mail, rejects a missing mail or a `rule_domain` mail without verified sender with an error structure, picks an action per route (`open_ticket`, `file_documents`, `log_only`), reads the stored attachment files (up to 5 MB in memory), logs the action and returns a summary. Copy it into your project, replace the action by your own logic, and set `business_sequence` to it, for example `myProject.process_mail`.
+
+## Admin page
+
+The NGX application of the project is an admin page that lists the stored mails, newest first, 25 per page: subject (shortened to 80 characters), sender, reception date, routing status (coloured pill) and route, and a paperclip with the number of attachments when the mail has some. One checkbox per routing status, with its count, filters the list; Previous / Next buttons page through it and Refresh reloads the current page.
+
+The page loads through the shared action `LoadMailsPage`, which calls `admin_list_mails` (variables `page`, `page_size` (max 100), `statuses`: comma-separated, empty = all). That sequence only answers a browser session logged into the Convertigo administration console as an administrator (WEB_ADMIN role). It checks the session itself: Private alone is not enough, because the Studio lets anyone run Private sequences and a server lets any console user with the test platform role run them. Log into the console first, then open the application in the same browser (`.../convertigo/projects/lib_MailListener/DisplayObjects/mobile/` on a server, the viewer URL in the Studio). Anybody else gets "Access denied" (error code 403) and no data. The list reads at most 10 000 mail documents; a note is shown when that limit is reached.
 
 ## Data
 
-Database `maillistener` (FullSync connector): one `mail-<uid>` document per mail (sender, subject, body up to 200 000 characters, attachment metadata and files, routing status) and the `state-inbox` document (cursor, UIDVALIDITY, lock, last run, last error). All sequences are Private: only `mail_poll` is meant to be scheduled, the others are called by it and can be run alone from the Studio.
-
+Database `maillistener` (FullSync connector): one `mail-<uid>` document per mail (sender, subject, body up to 200 000 characters, attachment metadata and files, routing status) and the `state-inbox` document (cursor, UIDVALIDITY, lock, last run, last error). All sequences are Private: only `mail_poll` is meant to be scheduled, the others are called by it (or by the admin page) and can be run alone from the Studio.
 
 <details><summary><span style="color:DarkGoldenRod"><i>Connectors</i></span></summary><blockquote><p>
 
@@ -158,12 +163,66 @@ comment
 
 </p></blockquote></details>
 
+<details><summary><b>find_mails</b> : Mango query for the admin list: every mail document with the fields the list shows (10 000 at most; the retention purge keeps the database small)</summary><blockquote><p>
+
+
+### ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/transactions/couchdb/images/postfind_color_16x16.png?raw=true "PostFindTransaction") find_mails
+
+Mango query for the admin list: every mail document with the fields the list shows (10 000 at most; the retention purge keeps the database small). Sorting, filtering and paging are done by admin_list_mails.
+</p></blockquote></details>
+
 <details><summary><b>find_retry_candidates</b> : Mango query: mails left pending (interrupted run) or in error (business sequence failure), for mail_replay</summary><blockquote><p>
 
 
 ### ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/transactions/couchdb/images/postfind_color_16x16.png?raw=true "PostFindTransaction") find_retry_candidates
 
 Mango query: mails left pending (interrupted run) or in error (business sequence failure), for mail_replay.
+</p></blockquote></details>
+
+<details><summary><b>get_attachment</b> : Reads one attachment file of a mail document for business sequences: attachment name = attachments[i]</summary><blockquote><p>
+
+
+### ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/transactions/couchdb/images/getdocumentattachment_color_16x16.png?raw=true "GetDocumentAttachmentTransaction") get_attachment
+
+Reads one attachment file of a mail document for business sequences: attachment name = attachments[i].storedName. Without _use_attpath the file comes back as base64 in couchdb_output/data (keep it for small files); with _use_attpath it is written to that path.
+
+<span style="color:DarkGoldenRod">Variables</span>
+
+<table>
+<tr>
+<th>
+name
+</th>
+<th>
+comment
+</th>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;_use_attname
+</td>
+<td>
+
+</td>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;_use_attpath
+</td>
+<td>
+
+</td>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;_use_docid
+</td>
+<td>
+
+</td>
+</tr>
+</table>
+
 </p></blockquote></details>
 
 <details><summary><b>get_document</b></summary><blockquote><p>
@@ -434,12 +493,58 @@ Placeholder transaction that intentionally cancels execution
 <details><summary><span style="color:DarkGoldenRod"><i>Sequences</i></span></summary><blockquote><p>
 
 
-<details><summary><b>demo_business</b> : Placeholder business sequence, default value of the business_sequence variable of mail_poll</summary><blockquote><p>
+<details><summary><b>admin_list_mails</b> : Admin list of the stored mails for the NGX admin page, newest first, one page at a time</summary><blockquote><p>
+
+
+## ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/sequences/images/genericsequence_color_16x16.png?raw=true "GenericSequence") admin_list_mails
+
+Admin list of the stored mails for the NGX admin page, newest first, one page at a time. Only answers a browser session logged into the Convertigo administration console as an administrator (WEB_ADMIN role), in the Studio too; any other caller gets an error structure (code 403) and nothing is read. Variables: page (from 1), page_size (25, max 100), statuses (comma-separated, empty = all, 'none' = nothing). Returns {items: [{docid, from, subject (80 chars max), receivedAt, status, route, hasAttachments, attachmentCount}], total (after the filter), page, pageSize, pageCount, first, last, all (before the filter), capped (true when the 10 000 documents limit was reached), counts: {routed, unmatched, error, pending, store_error}, statusCounts: [{status, count}] (same counts, as a list)}.
+
+<span style="color:DarkGoldenRod">Variables</span>
+
+<table>
+<tr>
+<th>
+name
+</th>
+<th>
+comment
+</th>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;page
+</td>
+<td>
+
+</td>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;page_size
+</td>
+<td>
+
+</td>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/variables/images/variable_color_16x16.png?raw=true "  alt="RequestableVariable" >&nbsp;statuses
+</td>
+<td>
+
+</td>
+</tr>
+</table>
+
+</p></blockquote></details>
+
+<details><summary><b>demo_business</b> : Reference implementation of the business sequence contract, default value of the business_sequence variable of mail_poll</summary><blockquote><p>
 
 
 ## ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/sequences/images/genericsequence_color_16x16.png?raw=true "GenericSequence") demo_business
 
-Placeholder business sequence, default value of the business_sequence variable of mail_poll. Receives docid (mail-<uid>) and route. Replace it by setting business_sequence to your own sequence (project.sequence).
+Reference implementation of the business sequence contract, default value of the business_sequence variable of mail_poll. Input: docid (mail-<uid>) and route. Reads the mail with maillistener.get_document, checks it (missing mail, rule_domain without verified sender: error structure, so mail_route sets status error and mail_replay retries), picks an action per route (open_ticket, file_documents, log_only), reads the stored attachment files with maillistener.get_attachment (files up to 5 MB in memory), logs the action and returns a summary. Read-only, hence idempotent. Copy it into your project and replace the action by your own logic, then set business_sequence to yourProject.yourSequence.
 
 <span style="color:DarkGoldenRod">Variables</span>
 
@@ -761,6 +866,36 @@ Describes the mobile application global properties
 
 ### ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/ngx/components/images/pagecomponent_color_16x16.png?raw=true "PageComponent") Page
 
-Default home page
+Admin list of the stored mails. Calls the Private sequence admin_list_mails: on a server engine it only answers a browser session already logged into the Convertigo administration console.
+</p></blockquote></details>
+
+<details><summary><span style="color:DarkGoldenRod"><i>Shared Actions</i></span></summary><blockquote><p>
+
+
+### ![](https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/ngx/components/images/uiactionstack_color_16x16.png?raw=true "UIActionStack") LoadMailsPage
+
+Loads one page of the admin mail list (admin_list_mails) with the checked status filters into page.local.results. Used by page enter, Refresh, Previous/Next and the filter checkboxes.
+
+<span style="color:DarkGoldenRod">Variables</span>
+
+<table>
+<tr>
+<th>
+name
+</th>
+<th>
+comment
+</th>
+</tr>
+<tr>
+<td>
+<img src="https://github.com/convertigo/convertigo/blob/develop/engine/src/com/twinsoft/convertigo/beans/ngx/components/images/uistackvariable_16x16.png?raw=true "  alt="UIStackVariable" >&nbsp;page
+</td>
+<td>
+Page to load, from 1
+</td>
+</tr>
+</table>
+
 </p></blockquote></details>
 </p></blockquote></details>

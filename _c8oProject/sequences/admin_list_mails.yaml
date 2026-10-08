@@ -1,5 +1,34 @@
 accessibility: Private
-comment: 'Admin list of the stored mails for the NGX admin page, newest first, one page at a time. Variables: page (from 1), page_size (25, max 100), statuses (comma-separated, empty = all, ''none'' = nothing). Returns {items: [{docid, from, subject (80 chars max), receivedAt, status, route, hasAttachments, attachmentCount}], total (after the filter), page, pageSize, pageCount, first, last, all (before the filter), capped (true when the 10 000 documents limit was reached), counts: {routed, unmatched, error, pending, store_error}, statusCounts: [{status, count}] (same counts, as a list)}. Private on purpose: only a session authenticated in the Convertigo administration console can call it from the app (anonymous HTTP calls are refused on a server engine; the Studio allows Private calls for development).'
+comment: 'Admin list of the stored mails for the NGX admin page, newest first, one page at a time. Only answers a browser session logged into the Convertigo administration console as an administrator (WEB_ADMIN role), in the Studio too; any other caller gets an error structure (code 403) and nothing is read. Variables: page (from 1), page_size (25, max 100), statuses (comma-separated, empty = all, ''none'' = nothing). Returns {items: [{docid, from, subject (80 chars max), receivedAt, status, route, hasAttachments, attachmentCount}], total (after the filter), page, pageSize, pageCount, first, last, all (before the filter), capped (true when the 10 000 documents limit was reached), counts: {routed, unmatched, error, pending, store_error}, statusCounts: [{status, count}] (same counts, as a list)}.'
+↓check_admin [steps.SimpleStep-1791385119339]: 
+  comment: Is the caller logged into the administration console as an administrator?
+  expression: |
+    '// Private is not enough: the Studio lets anyone run Private sequences, and a server lets any console user with the
+    // test platform role run them. Only a browser session logged into the administration console as an administrator
+    // (WEB_ADMIN role) may list the mails.
+    var Engine = com.twinsoft.convertigo.engine.Engine;
+    var Role = com.twinsoft.convertigo.engine.AuthenticatedSessionManager.Role;
+    var request = context.httpServletRequest;
+    var httpSession = request != null ? request.getSession(false) : null;
+    is_admin = httpSession != null && Engine.authenticatedSessionManager.hasRole(httpSession, Role.WEB_ADMIN);'
+↓if_denied [steps.IfStep-1791385119357]: 
+  comment: 'Not an administrator: error structure, nothing read from the database.'
+  condition: '!is_admin'
+  ↓denied [steps.XMLErrorStep-1791385119359]: 
+    code: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+        - SmartType: 
+          - ↑mode: PLAIN
+          - →→: 403
+    comment: Read by the admin page (out.error.message).
+    message: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+        - SmartType: 
+          - ↑mode: PLAIN
+          - →→: 'Access denied: log into the Convertigo administration console as an administrator, then reload this page.'
+  ↓stop [steps.ReturnStep-1791385119361]: 
 ↓find [steps.TransactionStep-1791383567927]: 
   comment: Loads the mail documents (list fields only).
   sourceTransaction: lib_MailListener.maillistener.find_mails

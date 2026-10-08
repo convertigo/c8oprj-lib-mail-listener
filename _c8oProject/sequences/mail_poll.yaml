@@ -1,6 +1,16 @@
 accessibility: Private
-comment: Scheduled entry point. Takes the state-inbox lock (skips when another run is live), polls the IMAP inbox for mails with uid > lastUid (at most max_per_poll), hands the batch to mail_ingest (store, route, cursor), retries pending / error mails with mail_replay, purges mail documents older than the retention with mail_purge, then releases the lock and records lastError. First run (or UIDVALIDITY change) starts from the current UIDNEXT. Scheduled outside the project (administration console).
+comment: 'Scheduled entry point. Takes the state-inbox lock (skips when another run is live), polls the IMAP inbox for mails with uid > lastUid (at most max_per_poll), hands the batch to mail_ingest (store, route, cursor), retries pending / error mails with mail_replay, purges mail documents older than the retention with mail_purge, then releases the lock and records lastError. First run (or UIDVALIDITY change) starts from the current UIDNEXT. Returns a run summary (key result: status ok / failed / skipped, one-line summary, mailbox cursor, counts, one line per mail read with sender, subject and outcome, replay, purge, errors) and logs the one-line summary at INFO. Scheduled outside the project (administration console).'
 responseTimeout: 3600
+↓start_run [steps.SimpleStep-1791469424786]: 
+  comment: 'Run bookkeeping for the summary: start time, watched mailbox, sub-sequence results.'
+  expression: |
+    // Run bookkeeping for the summary built by build_summary (and by the skip outputs).
+    run_started_ms = Date.now();
+    run_account = "${lib_maillistener.imap.user=changeme}";
+    run_folder = "${lib_maillistener.imap.folder=INBOX}";
+    ingest_result = null;
+    replay_result = null;
+    purge_result = null;
 ↓get_state [steps.TransactionStep-1791302911098]: 
   comment: Reads the state-inbox document (lastUid cursor + running lock).
   sourceTransaction: lib_MailListener.maillistener.get_document
@@ -73,7 +83,7 @@ responseTimeout: 3600
         - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
         - SmartType: 
           - ↑mode: JS
-          - →→: '({ skipped: true, reason: "another run holds the lock since " + lock_holder_since })'
+          - →→: '({ status: "skipped", summary: "skipped: another run holds the lock since " + lock_holder_since, startedAt: new Date(run_started_ms).toISOString(), reason: "lock_busy", lockedSince: lock_holder_since })'
     key: 
       - xmlizable: 
         - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
@@ -109,7 +119,7 @@ responseTimeout: 3600
         - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
         - SmartType: 
           - ↑mode: JS
-          - →→: '({ skipped: true, reason: "lock taken by a concurrent run (HTTP " + lock_status + ")" })'
+          - →→: '({ status: "skipped", summary: "skipped: lock taken by a concurrent run (HTTP " + lock_status + ")", startedAt: new Date(run_started_ms).toISOString(), reason: "lock_lost" })'
     key: 
       - xmlizable: 
         - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
@@ -267,7 +277,6 @@ responseTimeout: 3600
   condition: fetch_error == ""
   ↓call_ingest [steps.SequenceStep-1791307362465]: 
     comment: Stores, routes and commits the cursor for the fetched batch.
-    output: true
     sourceSequence: lib_MailListener.mail_ingest
     ↓mails [variables.StepVariable-1791307362467]: 
       description: From the JavaScript scope (fetch_mails)
@@ -292,9 +301,19 @@ responseTimeout: 3600
           - java.lang.String: 
             - ↑value: ./document/error/details/text()
     variableName: ingest_error
+  ↓src_ingest_result [steps.JsonSourceStep-1791469424826]: 
+    comment: Summary returned by mail_ingest, with one line per mail (null when it failed).
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791307362465
+          - java.lang.String: 
+            - ↑value: ./document/result
+    variableName: ingest_result
   ↓call_replay [steps.SequenceStep-1791307362477]: 
     comment: Retries pending / error mails while the lock is held.
-    output: true
     sourceSequence: lib_MailListener.mail_replay
     ↓business_sequence [variables.StepVariable-1791380869001]: 
       description: From the JavaScript scope (mail_poll variable)
@@ -309,9 +328,19 @@ responseTimeout: 3600
           - java.lang.String: 
             - ↑value: ./document/error/details/text()
     variableName: replay_error
+  ↓src_replay_result [steps.JsonSourceStep-1791469424838]: 
+    comment: Summary returned by mail_replay (null when it failed).
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791307362477
+          - java.lang.String: 
+            - ↑value: ./document/result
+    variableName: replay_result
 ↓call_purge [steps.SequenceStep-1791376420190]: 
   comment: Retention purge (runs even when the IMAP fetch failed).
-  output: true
   sourceSequence: lib_MailListener.mail_purge
 ↓src_purge_error [steps.SimpleSourceStep-1791376431922]: 
   comment: Error raised by mail_purge (null when it succeeded).
@@ -324,6 +353,17 @@ responseTimeout: 3600
         - java.lang.String: 
           - ↑value: ./document/error/details/text()
   variableName: purge_error
+↓src_purge_result [steps.JsonSourceStep-1791469424855]: 
+  comment: Summary returned by mail_purge (null when it failed).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791376420190
+        - java.lang.String: 
+          - ↑value: ./document/result
+  variableName: purge_result
 ↓prepare_release [steps.SimpleStep-1791307362479]: 
   comment: Builds the lock release with the outcome of the run.
   expression: |
@@ -355,15 +395,136 @@ responseTimeout: 3600
         - java.lang.String: 
           - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
   variableName: release_status
-↓check_run [steps.SimpleStep-1791307362491]: 
-  comment: Fails the run (visible in the Scheduler log) once the lock is released.
+↓build_summary [steps.SimpleStep-1791469424862]: 
+  comment: Builds the run summary (status, one-line summary, mailbox cursor, counts, one line per mail read, replay, purge, errors).
   expression: |
-    '// Surface failures to the caller (Scheduler log) only after the lock is released.
-    if (!/^20[12]$/.test(String(release_status))) {
-      run_error = (run_error != "" ? run_error + " | " : "") + "lock release failed, HTTP status " + release_status;
+    '// Run summary returned by mail_poll (key result); log_summary writes its one-line summary at INFO. The log line holds
+    // counts and errors only: senders and subjects stay in the returned summary, out of the engine logs.
+    var asList = function (v) { return v == null ? [] : (typeof v == "object" && typeof v.length == "number" ? v : [v]); };
+    var num = function (v) { return Number(v) || 0; };
+    var finishedMs = Date.now();
+    var fetchOk = String(fetch_error || "") == "";
+    var ingest = (ingest_result != null && typeof ingest_result == "object") ? ingest_result : null;
+    var replay = (replay_result != null && typeof replay_result == "object") ? replay_result : null;
+    var purge = (purge_result != null && typeof purge_result == "object") ? purge_result : null;
+    
+    var cursorBefore = num(typeof lastUidVar == "undefined" ? 0 : lastUidVar);
+    var storedValidity = (typeof uidValidityVar == "undefined" || uidValidityVar == null) ? "" : String(uidValidityVar);
+    var mailbox = {
+      account: run_account,
+      folder: run_folder,
+      uidValidity: fetchOk ? String(uid_validity) : storedValidity,
+      uidNext: fetchOk ? num(uid_next) : null,
+      cursorBefore: cursorBefore,
+      cursorAfter: ingest ? num(ingest.lastUid) : cursorBefore,
+      firstRun: fetchOk && (cursorBefore <= 0 || (storedValidity != "" && storedValidity != String(uid_validity))),
+      hasMore: fetchOk && String(has_more) == "true"
+    };
+    
+    // Mails read by this run, one line each (status: routed, unmatched, error, pending, already_stored, store_error,
+    // not_saved)
+    var newMails = ingest ? asList(ingest.mails) : [];
+    var counts = { read: newMails.length, routed: 0, unmatched: 0, error: 0, pending: 0, alreadyStored: 0, storeError: 0, notSaved: 0 };
+    var statusKeys = { routed: "routed", unmatched: "unmatched", error: "error", pending: "pending", already_stored: "alreadyStored", store_error: "storeError", not_saved: "notSaved" };
+    for (var i = 0; i < newMails.length; i++) {
+      counts[statusKeys[String(newMails[i].status)] || "error"]++;
     }
-    if (run_error != "") {
-      throw new Error(run_error);
+    if (ingest == null && fetchOk) {
+      // mail_ingest failed as a whole: the outcome per mail is unknown, only the number of fetched mails is reported
+      try { counts.read = JSON.parse(String(mails || "[]")).length; } catch (e) {}
+    }
+    var replaySummary = replay == null ? null : {
+      candidates: num(replay.candidates),
+      retried: num(replay.retried),
+      routed: num(replay.routed),
+      unmatched: num(replay.unmatched),
+      errors: num(replay.errors),
+      skippedMaxAttempts: num(replay.skippedMaxAttempts),
+      mails: asList(replay.mails)
+    };
+    var purgeSummary = purge == null ? null : {
+      retentionDays: num(purge.retentionDays),
+      cutoff: String(purge.cutoff || ""),
+      expired: num(purge.expired),
+      deleted: num(purge.deleted),
+      failed: num(purge.failed),
+      hasMore: String(purge.hasMore) == "true"
+    };
+    
+    var errors = [];
+    if (!fetchOk) { errors.push("fetch: " + fetch_error); }
+    if (String(ingest_error || "") != "") { errors.push("ingest: " + ingest_error); }
+    if (String(replay_error || "") != "") { errors.push("replay: " + replay_error); }
+    if (String(purge_error || "") != "") { errors.push("purge: " + purge_error); }
+    if (!/^20[12]$/.test(String(release_status))) { errors.push("lock release failed, HTTP status " + release_status); }
+    
+    // One-line summary, for example: "3 mails read (1 routed, 1 unmatched, 1 already stored); replay: 1 retried
+    // (1 routed, 0 unmatched, 0 in error); purge: 4 deleted; 2.4 s"
+    var parts = [];
+    if (!fetchOk) {
+      parts.push("mailbox not read");
+    } else if (counts.read == 0) {
+      parts.push("no new mail");
+    } else {
+      var details = [];
+      var labels = [["routed", "routed"], ["unmatched", "unmatched"], ["error", "in error"], ["pending", "left pending"],
+        ["alreadyStored", "already stored"], ["storeError", "rejected by the database"], ["notSaved", "not saved"]];
+      for (var l = 0; l < labels.length; l++) {
+        if (counts[labels[l][0]] > 0) { details.push(counts[labels[l][0]] + " " + labels[l][1]); }
+      }
+      parts.push(counts.read + (counts.read == 1 ? " mail read" : " mails read") + (details.length > 0 ? " (" + details.join(", ") + ")" : ""));
+    }
+    if (mailbox.hasMore) { parts.push("more mails waiting for the next run"); }
+    if (replaySummary != null && replaySummary.retried > 0) {
+      parts.push("replay: " + replaySummary.retried + " retried (" + replaySummary.routed + " routed, " + replaySummary.unmatched + " unmatched, " + replaySummary.errors + " in error)");
+    }
+    if (replaySummary != null && replaySummary.skippedMaxAttempts > 0) {
+      parts.push(replaySummary.skippedMaxAttempts + " left in error after max attempts");
+    }
+    if (purgeSummary != null && (purgeSummary.deleted > 0 || purgeSummary.failed > 0)) {
+      parts.push("purge: " + purgeSummary.deleted + " deleted" + (purgeSummary.failed > 0 ? ", " + purgeSummary.failed + " failed" : ""));
+    }
+    parts.push(((finishedMs - run_started_ms) / 1000).toFixed(1) + " s");
+    var summaryText = (errors.length > 0 ? "FAILED: " + errors.join(" | ") + " -- " : "") + parts.join("; ");
+    
+    run_summary = {
+      status: errors.length > 0 ? "failed" : "ok",
+      summary: summaryText,
+      startedAt: new Date(run_started_ms).toISOString(),
+      finishedAt: new Date(finishedMs).toISOString(),
+      durationMs: finishedMs - run_started_ms,
+      businessSequence: String(business_sequence || ""),
+      mailbox: mailbox,
+      counts: counts,
+      mails: newMails,
+      replay: replaySummary,
+      purge: purgeSummary,
+      errors: errors
+    };'
+↓result [steps.JsonToXmlStep-1791469424868]: 
+  comment: Run summary of a successful run. A failed run ends with the check_run exception, which replaces this output and carries the one-line summary.
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: run_summary
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
+↓log_summary [steps.LogStep-1791469613800]: 
+  comment: Writes the one-line run summary (counts and errors, no mail content) in the Context logger at INFO. A failed run also logs it at ERROR through the check_run exception.
+  expression: '"mail_poll " + run_summary.status + ": " + run_summary.summary'
+↓check_run [steps.SimpleStep-1791307362491]: 
+  comment: Fails the run (visible in the Scheduler log) once the lock is released; the exception message is the one-line summary.
+  expression: |
+    '// Surface failures to the caller (Scheduler log) only after the lock is released and the summary is logged.
+    // The engine replaces the returned summary by the error, so the message carries the one-line summary.
+    if (run_summary.status == "failed") {
+      throw new Error(run_summary.summary);
     }'
 ↓max_per_poll [variables.RequestableVariable-1791305897339]: 
   description: Maximum number of mails fetched per run; the rest is picked up by the next run

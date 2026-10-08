@@ -9,7 +9,7 @@ responseTimeout: 3600
     mail_list.sort(function (a, b) { return a.uid - b.uid; });
     cursor_uid = Number(last_uid) || 0;
     cursor_blocked = false;
-    ingest_stats = { fetched: mail_list.length, saved: 0, duplicates: 0, storeErrors: 0, failed: 0, savedIds: [], storeErrorIds: [], failedIds: [] };'
+    ingest_stats = { fetched: mail_list.length, saved: 0, duplicates: 0, storeErrors: 0, failed: 0, savedIds: [], storeErrorIds: [], failedIds: [], mails: [] };'
 ↓foreach_mail [steps.SimpleIteratorStep-1791305813289]: 
   comment: Iterates over the batch (item = current mail).
   expression: mail_list
@@ -117,31 +117,55 @@ responseTimeout: 3600
               - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
       variableName: stub_status
   ↓track [steps.SimpleStep-1791305848638]: 
-    comment: Counts the outcome, advances the cursor while every mail so far is stored or traced, decides whether to route.
+    comment: Counts the outcome, advances the cursor while every mail so far is stored or traced, decides whether to route, and adds the mail to the run summary.
     expression: |
       '// Advances the cursor only while every mail so far is stored: 201/202 created, 409 already stored by a previous
       // poll, or rejected but traced as store_error. Anything else (database down...) blocks the cursor for a retry.
       var saveCode = String(save_status);
       var stubCode = String(stub_status || "");
       var created = saveCode == "201" || saveCode == "202";
+      var outcome = "";
       if (created) {
         ingest_stats.saved++;
         ingest_stats.savedIds.push(_id);
+        outcome = "pending";
       } else if (saveCode == "409") {
         ingest_stats.duplicates++;
+        outcome = "already_stored";
       } else if (stubCode == "201" || stubCode == "202") {
         ingest_stats.storeErrors++;
         ingest_stats.storeErrorIds.push(_id);
+        outcome = "store_error";
       } else {
         ingest_stats.failed++;
         ingest_stats.failedIds.push(_id);
         cursor_blocked = true;
+        outcome = "not_saved";
       }
       if (!cursor_blocked) {
         cursor_uid = Math.max(cursor_uid, Number(item.uid));
       }
       docid = _id;
-      route_needed = created;'
+      route_needed = created;
+      
+      // One line per mail for the run summary (sender, shortened subject, never the body); track_route completes it
+      // with the routing outcome of a new mail.
+      var summarySubject = String(item.subject == null ? "" : item.subject).replace(/\s+/g, " ").trim();
+      var summaryFrom = item.fromAddresses || [];
+      mail_entry = {
+        uid: Number(item.uid),
+        docid: _id,
+        receivedAt: String(item.receivedAt || ""),
+        from: summaryFrom.length == 1 ? String(summaryFrom[0]).toLowerCase() : String(item.from || ""),
+        senderVerified: null,
+        subject: summarySubject.length > 80 ? summarySubject.substring(0, 79) + "…" : summarySubject,
+        attachments: (item.attachments || []).length,
+        status: outcome,
+        route: "",
+        error: outcome == "store_error" ? "full document rejected by the database (HTTP " + saveCode + ")"
+          : outcome == "not_saved" ? "not saved (HTTP " + saveCode + "), fetched again by the next poll" : null
+      };
+      ingest_stats.mails.push(mail_entry);'
   ↓if_new_mail [steps.IfStep-1791305848658]: 
     comment: Only a mail stored by this poll is routed; a 409 means it was already handled.
     condition: route_needed
@@ -152,6 +176,41 @@ responseTimeout: 3600
         description: From the JavaScript scope (track)
       ↓business_sequence [variables.StepVariable-1791380868967]: 
         description: From the JavaScript scope (mail_ingest variable)
+    ↓src_route_result [steps.JsonSourceStep-1791469385436]: 
+      comment: Summary returned by mail_route (null when mail_route itself failed).
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1791305848663
+            - java.lang.String: 
+              - ↑value: ./document/result
+      variableName: route_result
+    ↓src_route_error [steps.SimpleSourceStep-1791469385449]: 
+      comment: Error raised by mail_route (null when it succeeded).
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1791305848663
+            - java.lang.String: 
+              - ↑value: ./document/error/details/text()
+      variableName: route_error
+    ↓track_route [steps.SimpleStep-1791469385459]: 
+      comment: Completes the run summary line of the new mail with the routing outcome.
+      expression: |
+        '// Completes the summary line of the new mail with the outcome written by mail_route. A mail_route failure leaves
+        // the mail pending: mail_replay retries it.
+        if (route_result != null && typeof route_result == "object" && route_result.status != null) {
+          mail_entry.status = String(route_result.status);
+          mail_entry.route = String(route_result.route || "");
+          mail_entry.senderVerified = String(route_result.senderVerified) == "true";
+          mail_entry.error = (route_result.error == null || String(route_result.error) == "") ? null : String(route_result.error);
+        } else {
+          mail_entry.error = "routing failed, left pending for mail_replay: " + String(route_error || "no response");
+        }'
 ↓compute_state [steps.SimpleStep-1791305813299]: 
   comment: Finalises the cursor and builds the state-inbox update.
   expression: |
@@ -203,7 +262,8 @@ responseTimeout: 3600
       failed: ingest_stats.failed,
       savedIds: ingest_stats.savedIds,
       storeErrorIds: ingest_stats.storeErrorIds,
-      failedIds: ingest_stats.failedIds
+      failedIds: ingest_stats.failedIds,
+      mails: ingest_stats.mails
     };'
 ↓result [steps.JsonToXmlStep-1791305848688]: 
   comment: Public summary of the run.

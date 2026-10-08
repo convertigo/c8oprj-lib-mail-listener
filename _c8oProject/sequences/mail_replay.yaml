@@ -22,7 +22,7 @@ responseTimeout: 3600
     var maxAttempts = Math.max(1, Number(max_attempts) || 3);
     var found = candidates || [];
     retry_list = [];
-    replay_stats = { candidates: found.length, retried: 0, routed: 0, unmatched: 0, errors: 0, skippedMaxAttempts: 0, retriedIds: [], errorIds: [] };
+    replay_stats = { candidates: found.length, retried: 0, routed: 0, unmatched: 0, errors: 0, skippedMaxAttempts: 0, retriedIds: [], errorIds: [], mails: [] };
     for (var c = 0; c < found.length; c++) {
       if ((Number(found[c].attempts) || 0) < maxAttempts) {
         retry_list.push(String(found[c]._id));
@@ -58,10 +58,33 @@ responseTimeout: 3600
           - java.lang.String: 
             - ↑value: ./document/result/status/text()
     variableName: replayed_status
+  ↓src_route_result [steps.JsonSourceStep-1791469385476]: 
+    comment: Summary returned by mail_route (null when mail_route itself failed).
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791307191006
+          - java.lang.String: 
+            - ↑value: ./document/result
+    variableName: route_result
+  ↓src_route_error [steps.SimpleSourceStep-1791469385487]: 
+    comment: Error raised by mail_route (null when it succeeded).
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791307191006
+          - java.lang.String: 
+            - ↑value: ./document/error/details/text()
+    variableName: route_error
   ↓count [steps.SimpleStep-1791307205136]: 
-    comment: Counts the outcome of the retry.
+    comment: Counts the outcome of the retry and keeps one summary line per retried mail.
     expression: |
-      'var outcome = String(replayed_status || "");
+      '// Counts the outcome of the retry and keeps one line per retried mail for the mail_poll run summary.
+      var outcome = String(replayed_status || "");
       if (outcome == "routed") {
         replay_stats.routed++;
       } else if (outcome == "unmatched") {
@@ -69,7 +92,19 @@ responseTimeout: 3600
       } else {
         replay_stats.errors++;
         replay_stats.errorIds.push(docid);
-      }'
+      }
+      var routed = (route_result != null && typeof route_result == "object") ? route_result : null;
+      replay_stats.mails.push({
+        docid: docid,
+        from: routed ? String(routed.from || "") : "",
+        senderVerified: routed ? String(routed.senderVerified) == "true" : null,
+        subject: routed ? String(routed.subject || "") : "",
+        status: outcome != "" ? outcome : "error",
+        route: routed ? String(routed.route || "") : "",
+        attempts: routed ? (Number(routed.attempts) || 0) : null,
+        error: routed ? ((routed.error == null || String(routed.error) == "") ? null : String(routed.error))
+          : "routing failed: " + String(route_error || "no response")
+      });'
 ↓result [steps.JsonToXmlStep-1791307205150]: 
   comment: Public summary of the replay.
   jsonObject: 

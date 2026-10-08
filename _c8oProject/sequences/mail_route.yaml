@@ -248,15 +248,26 @@ responseTimeout: 3600
           - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
   variableName: status_save_status
 ↓check_status [steps.SimpleStep-1791305897277]: 
-  comment: Fails the run if the status was not persisted, then builds the summary.
+  comment: Fails the run if the status was not persisted, then builds the summary (docid, sender, shortened subject, route, status, attempts, error).
   expression: |
     '// CouchDB reports a failed write as a normal response: fail instead of leaving the mail silently pending.
     if (!/^20[12]$/.test(String(status_save_status))) {
       throw new Error("Status update failed for " + docid + ", HTTP status " + status_save_status);
     }
-    route_summary = { docid: String(docid), route: route_var, status: status_var, attempts: mail_attempts + 1, error: error_var };'
+    // Public summary; the sender and the shortened subject (never the body) let callers report what was routed.
+    var summarySubject = (typeof subject_var == "undefined" || subject_var == null) ? "" : String(subject_var).replace(/\s+/g, " ").trim();
+    route_summary = {
+      docid: String(docid),
+      from: (typeof from_address_var == "undefined" || from_address_var == null) ? "" : String(from_address_var).toLowerCase(),
+      senderVerified: typeof sender_verified_var != "undefined" && String(sender_verified_var) == "true",
+      subject: summarySubject.length > 80 ? summarySubject.substring(0, 79) + "…" : summarySubject,
+      route: route_var,
+      status: status_var,
+      attempts: mail_attempts + 1,
+      error: error_var
+    };'
 ↓result [steps.JsonToXmlStep-1791305897283]: 
-  comment: 'Public summary: docid, route, status.'
+  comment: 'Public summary: docid, from, senderVerified, subject (80 characters), route, status, attempts, error.'
   jsonObject: 
     - xmlizable: 
       - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType

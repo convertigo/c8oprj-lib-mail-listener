@@ -208,26 +208,30 @@ title: Mails
     beanData: '{"ionBean":"DivTag"}'
     comment: Count and refresh button
     tagName: div
-    ↓CountLine [ngx.components.UIDynamicElement-1791384410223]: 
-      beanData: '{"ionBean":"Paragraph"}'
-      comment: Mails stored in the database
-      tagName: p
-      ↓Class [ngx.components.UIAttribute-1791384410225]: 
-        attrName: class
-        attrValue: 
-          - xmlizable: 
-            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
-            - MobileSmartSourceType: plain:mail-count
-      ↓CountValue [ngx.components.UIText-1791384410227]: 
-        textValue: 
-          - xmlizable: 
-            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
-            - MobileSmartSourceType: source:{"filter":"Local","project":"lib_MailListener","input":"","model":{"data":[{"localObject":"local"}],"path":"?.results?.all","prefix":"","suffix":"","custom":"","useCustom":false}}
-      ↓CountLabel [ngx.components.UIText-1791384410229]: 
-        textValue: 
-          - xmlizable: 
-            - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
-            - MobileSmartSourceType: 'plain: mails stored'
+    ↓CountIf [ngx.components.UIControlDirective-1791385150337]: 
+      comment: No count when the list could not be loaded
+      directiveExpression: '!local?.error'
+      directiveName: If
+      ↓CountLine [ngx.components.UIDynamicElement-1791384410223]: 
+        beanData: '{"ionBean":"Paragraph"}'
+        comment: Mails stored in the database
+        tagName: p
+        ↓Class [ngx.components.UIAttribute-1791384410225]: 
+          attrName: class
+          attrValue: 
+            - xmlizable: 
+              - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+              - MobileSmartSourceType: plain:mail-count
+        ↓CountValue [ngx.components.UIText-1791384410227]: 
+          textValue: 
+            - xmlizable: 
+              - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+              - MobileSmartSourceType: source:{"filter":"Local","project":"lib_MailListener","input":"","model":{"data":[{"localObject":"local"}],"path":"?.results?.all","prefix":"","suffix":"","custom":"","useCustom":false}}
+        ↓CountLabel [ngx.components.UIText-1791384410229]: 
+          textValue: 
+            - xmlizable: 
+              - ↑classname: com.twinsoft.convertigo.beans.ngx.components.MobileSmartSourceType
+              - MobileSmartSourceType: 'plain: mails stored'
     ↓Class [ngx.components.UIAttribute-1791383673406]: 
       attrName: class
       attrValue: 
