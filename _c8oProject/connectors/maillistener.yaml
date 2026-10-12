@@ -4,22 +4,24 @@ databaseName: maillistener
   ↓_use_json_base [variables.RequestableVariable-1791376317139]: 
     description: 'JSON array of {_id, _rev, _deleted: true}'
 ↓find_expired [transactions.couchdb.PostFindTransaction]: 
-  comment: 'Mango query for mail_purge: mail documents older than the retention (selector built by mail_purge and passed in _use_selector). The default selector matches nothing.'
+  comment: 'Mango query for mail_purge: mail and processing documents older than the retention (selector built by mail_purge and passed in _use_selector). The default selector matches nothing.'
   p_fields: '["_id", "_rev"]'
   p_limit: 200
-  p_selector: '({ type: "mail", storedAt: { "$lt": "" } })'
+  p_selector: '({ type: { "$in": ["mail", "processing"] }, storedAt: { "$lt": "" } })'
   ↓_use_selector [variables.RequestableVariable-1791376317043]: 
     description: Mango selector (JSON) built by mail_purge
 ↓find_mails [transactions.couchdb.PostFindTransaction]: 
-  comment: 'Mango query for the admin list: every mail document with the fields the list shows (10 000 at most; the retention purge keeps the database small). Sorting, filtering and paging are done by admin_list_mails.'
-  p_fields: '["_id", "from", "fromAddress", "subject", "receivedAt", "status", "route", "attachments"]'
+  comment: 'Mango query for the admin list: every processing document (one per mail and listener), plus the mail documents of the former single-listener format that still carry a status (until the purge). 10 000 at most; sorting, filtering and paging are done by admin_list_mails.'
+  p_fields: '["_id", "type", "listener", "mailId", "from", "fromAddress", "subject", "receivedAt", "status", "route", "attachments", "attachmentCount"]'
   p_limit: 10000
-  p_selector: '({ type: "mail" })'
+  p_selector: '({ "$or": [ { type: "processing" }, { type: "mail", status: { "$exists": true } } ] })'
 ↓find_retry_candidates [transactions.couchdb.PostFindTransaction]: 
-  comment: 'Mango query: mails left pending (interrupted run) or in error (business sequence failure), for mail_replay.'
-  p_fields: '["_id", "status", "attempts"]'
+  comment: 'Mango query for mail_replay: processing documents of one listener left pending (interrupted run, attachment files still being stored) or in error (business sequence failure). The selector (with the listener) is built by mail_replay and passed in _use_selector.'
+  p_fields: '["_id", "mailId", "status", "attempts"]'
   p_limit: 50
-  p_selector: '({ type: "mail", status: { "$in": ["pending", "error"] } })'
+  p_selector: '({ type: "processing", listener: "", status: { "$in": ["pending", "error"] } })'
+  ↓_use_selector [variables.RequestableVariable-1791477255596]: 
+    description: Mango selector (JSON) built by mail_replay
 ↓get_attachment [transactions.couchdb.GetDocumentAttachmentTransaction]: 
   comment: 'Reads one attachment file of a mail document for business sequences: attachment name = attachments[i].storedName. Without _use_attpath the file comes back as base64 in couchdb_output/data (keep it for small files); with _use_attpath it is written to that path.'
   ↓_use_docid [variables.RequestableVariable-1791381479751]: 
@@ -46,11 +48,11 @@ databaseName: maillistener
     description: End key (JSON)
 ↓post_document [transactions.couchdb.PostDocumentTransaction]: 
   ↓_id [variables.RequestableVariable-1791302884319]: 
-    description: Document id (mail-<imapUID> or state-inbox)
+    description: Document id (mail-<key>, proc-<listener>-<key> or state-<listener>)
   ↓_use_json_base [variables.RequestableVariable-1791302884335]: 
     description: JSON used as a base for the document
 ↓put_attachment [transactions.couchdb.PutDocumentAttachmentTransaction]: 
-  comment: Uploads one attachment file (temp file written from the IMAP part) onto a mail document. Requires the current _rev.
+  comment: Uploads one attachment file (temp file written by mail_poll from the IMAP part) onto a mail document. Requires the current _rev.
   responseTimeout: 1800
   ↓_use_docid [variables.RequestableVariable-1791379804807]: 
     description: Document id
@@ -65,11 +67,11 @@ databaseName: maillistener
   ↓_use_attcontent_type [variables.RequestableVariable-1791379804818]: 
     description: Content type returned when the attachment is read
 ↓update_document [transactions.couchdb.PostDocumentTransaction]: 
-  comment: Updates an existing document by merging the posted fields (state-inbox cursor, mail status, attachment metadata). The attachments array is replaced, not merged (p_merge). CouchDB attachments (_attachments) are kept. post_document keeps policy none so creating an existing mail-<uid> stays a 409 (dedup).
+  comment: Updates an existing document by merging the posted fields (state-<listener> cursor, processing status, attachment metadata). The attachments array is replaced, not merged (p_merge). CouchDB attachments (_attachments) are kept. post_document keeps policy none so creating an existing document stays a 409 (store once, claim once).
   p_merge: '{"attachments":"override"}'
   policy: merge
   ↓_id [variables.RequestableVariable-1791305813265]: 
-    description: Document id (mail-<imapUID> or state-inbox)
+    description: Document id (mail-<key>, proc-<listener>-<key> or state-<listener>)
   ↓_use_json_base [variables.RequestableVariable-1791305813267]: 
     description: JSON fields merged into the document
 ↓listener [couchdb.DesignDocument]: 
@@ -89,12 +91,14 @@ databaseName: maillistener
         }
       }'
 ↓by_type_status [couchdb.JsonIndex]: 
-  comment: Index for find_retry_candidates (type + status).
+  comment: Index for find_retry_candidates (type + listener + status).
   fields: 
     - xmlizable: 
       - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
       - com.twinsoft.convertigo.beans.common.XMLVector: 
         - java.lang.String: 
           - ↑value: type
+        - java.lang.String: 
+          - ↑value: listener
         - java.lang.String: 
           - ↑value: status

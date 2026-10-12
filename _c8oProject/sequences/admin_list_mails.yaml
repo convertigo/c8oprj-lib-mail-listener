@@ -1,5 +1,5 @@
 accessibility: Private
-comment: 'Admin list of the stored mails for the NGX admin page, newest first, one page at a time. Only answers a browser session logged into the Convertigo administration console as an administrator (WEB_ADMIN role), in the Studio too; any other caller gets an error structure (code 403) and nothing is read. Variables: page (from 1), page_size (25, max 100), statuses (comma-separated, empty = all, ''none'' = nothing). Returns {items: [{docid, from, subject (80 chars max), receivedAt, status, route, hasAttachments, attachmentCount}], total (after the filter), page, pageSize, pageCount, first, last, all (before the filter), capped (true when the 10 000 documents limit was reached), counts: {routed, unmatched, error, pending, store_error}, statusCounts: [{status, count}] (same counts, as a list)}.'
+comment: 'Admin list for the NGX admin page: one line per mail and listener (processing documents), newest first, one page at a time. Only answers a browser session logged into the Convertigo administration console as an administrator (WEB_ADMIN role), in the Studio too; any other caller gets an error structure (code 403) and nothing is read. Variables: listener (empty = all), page (from 1), page_size (25, max 100), statuses (comma-separated, empty = all, ''none'' = nothing). Returns {items: [{docid, listener, from, subject (80 chars max), receivedAt, status, route, hasAttachments, attachmentCount}], total (after the filters), page, pageSize, pageCount, first, last, all (lines of the kept listener, before the status filter), capped (true when the 10 000 documents limit was reached), listeners (every listener found), counts: {routed, unmatched, error, pending, store_error}, statusCounts: [{status, count}] (same counts, as a list)}.'
 ↓check_admin [steps.SimpleStep-1791385119339]: 
   comment: Is the caller logged into the administration console as an administrator?
   expression: |
@@ -44,11 +44,25 @@ comment: 'Admin list of the stored mails for the NGX admin page, newest first, o
           - ↑value: ./document/couchdb_output/docs
   variableName: mail_docs
 ↓shape [steps.SimpleStep-1791383579525]: 
-  comment: 'Builds the list contract: status counts, status filter, newest first, one page, subject shortened, attachment indicator.'
+  comment: 'Builds the list contract: listener filter, status counts, status filter, newest first, one page, subject shortened, attachment indicator.'
   expression: |
-    '// Admin list contract: status counts (on all mails), status filter, newest first, one page.
+    '// Admin list contract, one line per mail and listener (processing documents; a mail document of the former
+    // single-listener format counts as listener "inbox" until the purge): listener filter, status counts (on the kept
+    // listener), status filter, newest first, one page.
     var STATUSES = ["routed", "unmatched", "error", "pending", "store_error"];
-    var docs = mail_docs || [];
+    var rows = mail_docs || [];
+    var listenerFilter = String(listener == null ? "" : listener).trim();
+    if (listenerFilter == "null") { listenerFilter = ""; }
+    var rowListener = function (d) { return String(d.type) == "processing" ? String(d.listener || "") : "inbox"; };
+    var listenerSet = {};
+    var listeners = [];
+    var docs = [];
+    for (var a = 0; a < rows.length; a++) {
+      var name = rowListener(rows[a]);
+      if (!listenerSet[name]) { listenerSet[name] = true; listeners.push(name); }
+      if (listenerFilter == "" || listenerFilter == name) { docs.push(rows[a]); }
+    }
+    listeners.sort();
     
     var counts = {};
     for (var s = 0; s < STATUSES.length; s++) { counts[STATUSES[s]] = 0; }
@@ -71,7 +85,7 @@ comment: 'Admin list of the stored mails for the NGX admin page, newest first, o
     for (var k = 0; k < docs.length; k++) {
       if (wanted == null || wanted[String(docs[k].status || "")]) { kept.push(docs[k]); }
     }
-    kept.sort(function (a, b) { return String(b.receivedAt || "").localeCompare(String(a.receivedAt || "")); });
+    kept.sort(function (x, y) { return String(y.receivedAt || "").localeCompare(String(x.receivedAt || "")); });
     
     var size = parseInt(page_size, 10);
     if (isNaN(size) || size < 1) { size = 25; }
@@ -86,18 +100,20 @@ comment: 'Admin list of the stored mails for the NGX admin page, newest first, o
     var items = [];
     for (var i = start; i < end; i++) {
       var d = kept[i];
+      var isProcessing = String(d.type) == "processing";
       var subject = String(d.subject || "").trim();
       if (subject == "" || subject == "null") { subject = "(no subject)"; }
-      var attachments = d.attachments || [];
+      var attachmentCount = isProcessing ? (Number(d.attachmentCount) || 0) : (d.attachments || []).length;
       items.push({
-        docid: String(d._id),
+        docid: String(isProcessing ? d.mailId : d._id),
+        listener: rowListener(d),
         from: String(d.fromAddress || d.from || ""),
         subject: subject.length > 80 ? subject.substring(0, 79) + "…" : subject,
         receivedAt: String(d.receivedAt || ""),
         status: String(d.status || ""),
         route: String(d.route || ""),
-        hasAttachments: attachments.length > 0,
-        attachmentCount: attachments.length
+        hasAttachments: attachmentCount > 0,
+        attachmentCount: attachmentCount
       });
     }
     admin_list = {
@@ -109,7 +125,8 @@ comment: 'Admin list of the stored mails for the NGX admin page, newest first, o
       first: kept.length == 0 ? 0 : start + 1,
       last: end,
       all: docs.length,
-      capped: docs.length >= 10000,
+      capped: rows.length >= 10000,
+      listeners: listeners,
       counts: counts,
       statusCounts: statusCounts
     };'
@@ -135,3 +152,5 @@ comment: 'Admin list of the stored mails for the NGX admin page, newest first, o
   value: 25
 ↓statuses [variables.RequestableVariable-1791384138258]: 
   description: Comma-separated statuses to keep (routed, unmatched, error, pending, store_error). Empty = all; 'none' = nothing
+↓listener [variables.RequestableVariable-1791477652451]: 
+  description: Listener to show (empty = all listeners)

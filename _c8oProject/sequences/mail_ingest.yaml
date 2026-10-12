@@ -1,5 +1,5 @@
 accessibility: Private
-comment: Stores a batch of fetched mails as mail-<uid> documents (409 = already stored; rejected document = minimal store_error trace), routes each new one through mail_route, then commits the state-inbox cursor. The cursor only advances over mails that are stored or traced. Called by mail_poll under its lock; callable alone in Studio with a synthetic batch.
+comment: Stores a batch of fetched mails for one listener. Each mail is stored once in the database as mail-<key>, shared by every listener (409 = already stored by a previous run or by another listener; rejected document = minimal store_error trace), with its attachment files when this read creates it. It is then claimed for this listener (proc-<listener>-<key>, 409 = already processed by this listener) and each newly claimed mail goes to mail_route. Finally the state-<listener> cursor is committed; it only advances over mails stored (or traced) and claimed. Called by mail_poll under its lock; callable alone in Studio with a synthetic batch.
 responseTimeout: 3600
 ↓prepare [steps.SimpleStep-1791305813287]: 
   comment: Parses the batch and initialises the cursor bookkeeping.
@@ -9,12 +9,13 @@ responseTimeout: 3600
     mail_list.sort(function (a, b) { return a.uid - b.uid; });
     cursor_uid = Number(last_uid) || 0;
     cursor_blocked = false;
-    ingest_stats = { fetched: mail_list.length, saved: 0, duplicates: 0, storeErrors: 0, failed: 0, savedIds: [], storeErrorIds: [], failedIds: [], mails: [] };'
+    listener = String(listener || "inbox").trim();
+    ingest_stats = { fetched: mail_list.length, stored: 0, alreadyStored: 0, storeErrors: 0, claimed: 0, alreadyProcessed: 0, failed: 0, mails: [] };'
 ↓foreach_mail [steps.SimpleIteratorStep-1791305813289]: 
   comment: Iterates over the batch (item = current mail).
   expression: mail_list
   ↓prepare_save [steps.SimpleStep-1791305813291]: 
-    comment: Verifies the sender and builds the mail-<uid> document for save_mail.
+    comment: Verifies the sender and builds the shared mail-<key> document and the list of files to upload.
     expression: |
       '// Sender authenticity: trust only the topmost Authentication-Results header written by our own receiving server
       // (authserv-id) and require DMARC pass for the domain of a single From address.
@@ -28,37 +29,72 @@ responseTimeout: 3600
         var dmarc = /\bdmarc=pass\b[^;]*\bheader\.from=([^\s;]+)/i.exec(authResults);
         senderVerified = dmarc != null && dmarc[1].toLowerCase() == fromDomain;
       }
-      var attachmentList = item.attachments || [];
       
-      // Builds the mail-<uid> document; the save_mail step variables pick _id and _use_json_base from this scope.
-      // uidValidity lets mail_store_attachments find the message again; attachment files are stored only once routed.
-      _id = "mail-" + item.uid;
+      // Attachment metadata (never the temp path) and the files downloaded by fetch_mails, uploaded by if_upload only when
+      // this read creates the document (attachmentsStatus storing meanwhile, so that other listeners wait for the files).
+      var source = item.attachments || [];
+      mail_attachments = [];
+      upload_list = [];
+      for (var a = 0; a < source.length; a++) {
+        var meta = { name: String(source[a].name || ""), contentType: String(source[a].contentType || ""), size: Number(source[a].size) || 0, stored: false };
+        if (source[a].skipped) { meta.skipped = String(source[a].skipped); }
+        mail_attachments.push(meta);
+        if (source[a].tempPath) {
+          upload_list.push({
+            index: a,
+            path: String(source[a].tempPath),
+            bytes: Number(source[a].bytes) || 0,
+            storedName: (a + 1) + "-" + String(source[a].name || "attachment").replace(/[^A-Za-z0-9._-]+/g, "_"),
+            contentType: String(source[a].contentType || "application/octet-stream")
+          });
+        }
+      }
+      mail_key = String(item.key);
+      mail_docid = "mail-" + mail_key;
+      mail_from = fromAddress;
+      mail_sender_verified = senderVerified;
+      
+      // The mail-<key> document is shared by every listener (store once: policy none, an existing document answers 409);
+      // the save_mail step variables pick _id and _use_json_base from this scope. The processing of the mail (status,
+      // route...) is kept per listener in proc-<listener>-<key>. Recipients are bare lowercase addresses; deliveredTo tells
+      // which address (alias, group) the mailbox received the mail for. contentError: why the body / attachments could not
+      // be read.
+      var now = new Date().toISOString();
+      _id = mail_docid;
       _use_json_base = JSON.stringify({
         type: "mail",
+        messageId: String(item.messageId || ""),
+        mailbox: item.mailbox,
+        folder: String(item.folder || ""),
         uid: item.uid,
         uidValidity: uid_validity == null ? "" : String(uid_validity),
-        mailbox: item.mailbox,
+        storedBy: listener,
         from: item.from,
         fromAddress: fromAddress,
         senderVerified: senderVerified,
+        to: item.to || [],
+        cc: item.cc || [],
+        replyTo: item.replyTo || [],
+        deliveredTo: item.deliveredTo || [],
         authResults: authResults,
         subject: item.subject,
         body: item.body,
         bodyTruncated: item.bodyTruncated === true,
+        contentError: item.contentError ? String(item.contentError) : null,
+        sentAt: String(item.sentAt || ""),
         receivedAt: item.receivedAt,
-        storedAt: new Date().toISOString(),
-        attachments: attachmentList,
-        attachmentsStatus: attachmentList.length > 0 ? "not_stored" : "none",
-        status: "pending",
-        route: "",
-        routedAt: "",
-        attempts: 0,
-        error: null
+        storedAt: now,
+        attachments: mail_attachments,
+        attachmentsStatus: upload_list.length > 0 ? "storing" : (mail_attachments.length > 0 ? "partial" : "none"),
+        storingSince: upload_list.length > 0 ? now : ""
       });
       save_status = "";
-      stub_status = "";'
+      save_rev = "";
+      stub_status = "";
+      claim_status = "";
+      meta_status = "";'
   ↓save_mail [steps.TransactionStep-1791305813293]: 
-    comment: 'Creates mail-<uid> with status=pending (policy none: an existing document answers 409).'
+    comment: 'Creates mail-<key> (policy none: an existing document answers 409, the mail is stored once whatever the listener).'
     sourceTransaction: lib_MailListener.maillistener.post_document
     ↓_id [variables.StepVariable-1791305813295]: 
       description: From the JavaScript scope (prepare_save)
@@ -75,28 +111,40 @@ responseTimeout: 3600
           - java.lang.String: 
             - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
     variableName: save_status
+  ↓read_save_rev [steps.SimpleSourceStep-1791477482348]: 
+    comment: Revision of the created document, needed by the first attachment upload.
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791305813293
+          - java.lang.String: 
+            - ↑value: ./document/couchdb_output/rev/text()
+    variableName: save_rev
   ↓if_save_failed [steps.IfStep-1791307158901]: 
     comment: 'The full document was rejected (not created, not already stored): keep a minimal trace instead.'
     condition: '!/^(201|202|409)$/.test(String(save_status))'
     ↓prepare_stub [steps.SimpleStep-1791307158903]: 
       comment: Builds the minimal store_error document.
       expression: |
-        '// The full document was rejected (too large, invalid content...): store a minimal trace with status store_error
-        // so the cursor can move on. mail_replay does not retry it (the content is gone): it needs a manual look.
-        _id = "mail-" + item.uid;
+        '// The full document was rejected (too large, invalid content...): store a minimal trace so the cursor can move on. The
+        // processing document of this listener gets status store_error; it is not retried (the content is gone).
+        _id = mail_docid;
         _use_json_base = JSON.stringify({
           type: "mail",
-          uid: item.uid,
+          messageId: String(item.messageId || ""),
           mailbox: item.mailbox,
+          folder: String(item.folder || ""),
+          uid: item.uid,
+          storedBy: listener,
           from: String(item.from || "").substring(0, 500),
           subject: String(item.subject || "").substring(0, 500),
           receivedAt: item.receivedAt,
           storedAt: new Date().toISOString(),
-          status: "store_error",
-          route: "",
-          routedAt: "",
-          attempts: 0,
-          error: "Full document rejected by the database (HTTP " + save_status + ")"
+          attachments: [],
+          attachmentsStatus: "none",
+          storeError: "Full document rejected by the database (HTTP " + save_status + ")"
         });'
     ↓save_stub [steps.TransactionStep-1791307158905]: 
       comment: Creates the minimal mail-<uid> document.
@@ -117,57 +165,235 @@ responseTimeout: 3600
               - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
       variableName: stub_status
   ↓track [steps.SimpleStep-1791305848638]: 
-    comment: Counts the outcome, advances the cursor while every mail so far is stored or traced, decides whether to route, and adds the mail to the run summary.
+    comment: Counts the outcome of the mail document, prepares the upload and the claim, and adds the mail to the run summary.
     expression: |
-      '// Advances the cursor only while every mail so far is stored: 201/202 created, 409 already stored by a previous
-      // poll, or rejected but traced as store_error. Anything else (database down...) blocks the cursor for a retry.
+      '// Outcome of the mail document: 201/202 created by this read, 409 already in the database (stored by a previous run
+      // or by another listener), rejected but traced as store_error. Anything else (database down...) blocks the cursor.
       var saveCode = String(save_status);
       var stubCode = String(stub_status || "");
-      var created = saveCode == "201" || saveCode == "202";
-      var outcome = "";
-      if (created) {
-        ingest_stats.saved++;
-        ingest_stats.savedIds.push(_id);
-        outcome = "pending";
+      mail_created = saveCode == "201" || saveCode == "202";
+      mail_traced = !mail_created && saveCode != "409" && (stubCode == "201" || stubCode == "202");
+      mail_exists = mail_created || saveCode == "409" || mail_traced;
+      if (mail_created) {
+        ingest_stats.stored++;
       } else if (saveCode == "409") {
-        ingest_stats.duplicates++;
-        outcome = "already_stored";
-      } else if (stubCode == "201" || stubCode == "202") {
+        ingest_stats.alreadyStored++;
+      } else if (mail_traced) {
         ingest_stats.storeErrors++;
-        ingest_stats.storeErrorIds.push(_id);
-        outcome = "store_error";
       } else {
         ingest_stats.failed++;
-        ingest_stats.failedIds.push(_id);
         cursor_blocked = true;
-        outcome = "not_saved";
       }
-      if (!cursor_blocked) {
-        cursor_uid = Math.max(cursor_uid, Number(item.uid));
-      }
-      docid = _id;
-      route_needed = created;
+      // The upload loop reuses item: keep the mail for the next steps
+      mail_item = item;
+      docid = mail_docid;
+      procid = "proc-" + listener + "-" + mail_key;
+      upload_needed = mail_created && upload_list.length > 0;
+      current_rev = String(save_rev || "");
+      upload_error = "";
       
-      // One line per mail for the run summary (sender, shortened subject, never the body); track_route completes it
-      // with the routing outcome of a new mail.
+      // One line per mail for the run summary (sender, shortened subject, never the body); track_claim and track_route
+      // complete it.
       var summarySubject = String(item.subject == null ? "" : item.subject).replace(/\s+/g, " ").trim();
-      var summaryFrom = item.fromAddresses || [];
       mail_entry = {
         uid: Number(item.uid),
-        docid: _id,
+        docid: docid,
+        procid: procid,
         receivedAt: String(item.receivedAt || ""),
-        from: summaryFrom.length == 1 ? String(summaryFrom[0]).toLowerCase() : String(item.from || ""),
-        senderVerified: null,
+        from: mail_from != "" ? mail_from : String(item.from || ""),
+        senderVerified: mail_sender_verified,
         subject: summarySubject.length > 80 ? summarySubject.substring(0, 79) + "…" : summarySubject,
-        attachments: (item.attachments || []).length,
-        status: outcome,
+        attachments: mail_attachments.length,
+        stored: mail_created,
+        status: mail_traced ? "store_error" : (mail_exists ? "pending" : "not_saved"),
         route: "",
-        error: outcome == "store_error" ? "full document rejected by the database (HTTP " + saveCode + ")"
-          : outcome == "not_saved" ? "not saved (HTTP " + saveCode + "), fetched again by the next poll" : null
+        error: mail_traced ? "full document rejected by the database (HTTP " + saveCode + ")"
+          : (mail_exists ? null : "not saved (HTTP " + saveCode + "), read again by the next poll")
       };
       ingest_stats.mails.push(mail_entry);'
+  ↓if_upload [steps.IfStep-1791477482363]: 
+    comment: 'This read created the mail document: upload its attachment files, then write the final metadata.'
+    condition: upload_needed
+    ↓foreach_file [steps.SimpleIteratorStep-1791477482365]: 
+      comment: Uploads each file (item = {index, path, bytes, storedName, contentType}).
+      expression: upload_list
+      ↓prepare_put [steps.SimpleStep-1791477482367]: 
+        comment: Exposes the put_attachment variables.
+        expression: |
+          // One PUT per file; each successful PUT returns the revision needed by the next one (item = upload_list entry).
+          _use_docid = docid;
+          _use_rev = current_rev;
+          _use_attname = item.storedName;
+          _use_attpath = item.path;
+          _use_attcontent_type = item.contentType;
+          put_status = "";
+          put_rev = "";
+      ↓put [steps.TransactionStep-1791477482369]: 
+        comment: Uploads the temp file as a CouchDB attachment of mail-<key>.
+        sourceTransaction: lib_MailListener.maillistener.put_attachment
+        ↓_use_docid [variables.StepVariable-1791477482371]: 
+          description: From the JavaScript scope (prepare_put)
+        ↓_use_rev [variables.StepVariable-1791477482373]: 
+          description: From the JavaScript scope (prepare_put)
+        ↓_use_attname [variables.StepVariable-1791477482375]: 
+          description: From the JavaScript scope (prepare_put)
+        ↓_use_attpath [variables.StepVariable-1791477482377]: 
+          description: From the JavaScript scope (prepare_put)
+        ↓_use_attcontent_type [variables.StepVariable-1791477482379]: 
+          description: From the JavaScript scope (prepare_put)
+      ↓read_put_status [steps.SimpleSourceStep-1791477500969]: 
+        comment: HTTP status of the upload.
+        sourceDefinition: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+            - com.twinsoft.convertigo.beans.common.XMLVector: 
+              - java.lang.String: 
+                - ↑value: 1791477482369
+              - java.lang.String: 
+                - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+        variableName: put_status
+      ↓read_put_rev [steps.SimpleSourceStep-1791477500979]: 
+        comment: New document revision after the upload.
+        sourceDefinition: 
+          - xmlizable: 
+            - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+            - com.twinsoft.convertigo.beans.common.XMLVector: 
+              - java.lang.String: 
+                - ↑value: 1791477482369
+              - java.lang.String: 
+                - ↑value: ./document/couchdb_output/rev/text()
+        variableName: put_rev
+      ↓after_put [steps.SimpleStep-1791477482381]: 
+        comment: Records the outcome of the upload.
+        expression: |
+          '// A failed upload is not retried (the temp file is deleted at the end of the run): the file stays listed with
+          // skipped = "upload_failed" and attachmentsStatus becomes error.
+          if (/^20[12]$/.test(String(put_status))) {
+            current_rev = String(put_rev);
+            mail_attachments[item.index].stored = true;
+            mail_attachments[item.index].storedName = item.storedName;
+            mail_attachments[item.index].storedBytes = item.bytes;
+          } else {
+            mail_attachments[item.index].skipped = "upload_failed";
+            upload_error = (upload_error != "" ? upload_error + " | " : "") + "upload of " + item.storedName + " failed, HTTP status " + put_status;
+          }'
+    ↓prepare_meta [steps.SimpleStep-1791477482383]: 
+      comment: Builds the final attachment metadata.
+      expression: |
+        '// Final attachment metadata: stored (every file stored), partial (some files skipped: too large or not
+        // downloadable), error (an upload failed). storingSince is cleared so that the other listeners stop waiting.
+        var storedCount = 0;
+        for (var m = 0; m < mail_attachments.length; m++) {
+          if (mail_attachments[m].stored === true) { storedCount++; }
+        }
+        _id = docid;
+        _use_json_base = JSON.stringify({
+          attachments: mail_attachments,
+          attachmentsStatus: upload_error != "" ? "error" : (storedCount == mail_attachments.length ? "stored" : "partial"),
+          attachmentsError: upload_error != "" ? upload_error : null,
+          storingSince: ""
+        });
+        meta_status = "";'
+    ↓update_meta [steps.TransactionStep-1791477482385]: 
+      comment: Merges attachments / attachmentsStatus into mail-<key> (the attachments array is replaced, the files are kept).
+      sourceTransaction: lib_MailListener.maillistener.update_document
+      ↓_id [variables.StepVariable-1791477482387]: 
+        description: From the JavaScript scope (prepare_meta)
+      ↓_use_json_base [variables.StepVariable-1791477482389]: 
+        description: From the JavaScript scope (prepare_meta)
+    ↓read_meta_status [steps.SimpleSourceStep-1791477500986]: 
+      comment: HTTP status of the metadata update.
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1791477482385
+            - java.lang.String: 
+              - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+      variableName: meta_status
+    ↓check_meta [steps.SimpleStep-1791477500991]: 
+      comment: Reports an upload or metadata problem in the run summary.
+      expression: |
+        '// A metadata update failure leaves attachmentsStatus at storing: the business sequences wait until it is stale.
+        if (!/^20[12]$/.test(String(meta_status))) {
+          upload_error = (upload_error != "" ? upload_error + " | " : "") + "attachment metadata update failed, HTTP status " + meta_status;
+        }
+        if (upload_error != "") {
+          mail_entry.attachmentsError = upload_error;
+        }'
+  ↓if_mail_exists [steps.IfStep-1791477482391]: 
+    comment: 'The mail is in the database (created, already there, or traced): claim it for this listener.'
+    condition: mail_exists
+    ↓prepare_claim [steps.SimpleStep-1791477482393]: 
+      comment: Builds the proc-<listener>-<key> processing document.
+      expression: |
+        '// Claims the mail for this listener: processing document proc-<listener>-<key>, created with policy none. A mail this
+        // listener already handled (read again, or by another instance of the same Scheduler job) answers 409 and is not
+        // handed to the business sequence twice; other listeners have their own processing document for the same mail.
+        _id = procid;
+        _use_json_base = JSON.stringify({
+          type: "processing",
+          listener: listener,
+          mailId: docid,
+          subject: String(mail_item.subject || "").substring(0, 500),
+          fromAddress: mail_entry.from,
+          senderVerified: mail_sender_verified,
+          receivedAt: String(mail_item.receivedAt || ""),
+          attachmentCount: mail_attachments.length,
+          storedAt: new Date().toISOString(),
+          status: mail_traced ? "store_error" : "pending",
+          route: "",
+          routedAt: "",
+          attempts: 0,
+          error: mail_traced ? "full document rejected by the database" : null
+        });
+        claim_status = "";'
+    ↓claim [steps.TransactionStep-1791477482395]: 
+      comment: 'Creates proc-<listener>-<key> (policy none: 409 when this listener already has the mail).'
+      sourceTransaction: lib_MailListener.maillistener.post_document
+      ↓_id [variables.StepVariable-1791477482397]: 
+        description: From the JavaScript scope (prepare_claim)
+      ↓_use_json_base [variables.StepVariable-1791477482399]: 
+        description: From the JavaScript scope (prepare_claim)
+    ↓read_claim_status [steps.SimpleSourceStep-1791477500997]: 
+      comment: HTTP status of the claim (201 claimed, 409 already processed by this listener).
+      sourceDefinition: 
+        - xmlizable: 
+          - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+          - com.twinsoft.convertigo.beans.common.XMLVector: 
+            - java.lang.String: 
+              - ↑value: 1791477482395
+            - java.lang.String: 
+              - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+      variableName: claim_status
+  ↓track_claim [steps.SimpleStep-1791477482401]: 
+    comment: Counts the claim, advances the cursor while every mail so far is stored and claimed, decides whether to route.
+    expression: |
+      '// The business sequence gets the mail only when this listener has just claimed it. The cursor advances only while
+      // every mail so far is stored (or traced) and claimed; otherwise it stays before the mail and the next poll reads it
+      // again.
+      var claimCode = String(claim_status || "");
+      var claimed = claimCode == "201" || claimCode == "202";
+      if (mail_exists) {
+        if (claimed) {
+          ingest_stats.claimed++;
+        } else if (claimCode == "409") {
+          ingest_stats.alreadyProcessed++;
+          mail_entry.status = "already_processed";
+        } else {
+          ingest_stats.failed++;
+          cursor_blocked = true;
+          mail_entry.status = "not_saved";
+          mail_entry.error = "processing document not created (HTTP " + claimCode + "), read again by the next poll";
+        }
+      }
+      if (!cursor_blocked) {
+        cursor_uid = Math.max(cursor_uid, Number(mail_item.uid));
+      }
+      route_needed = claimed && !mail_traced;'
   ↓if_new_mail [steps.IfStep-1791305848658]: 
-    comment: Only a mail stored by this poll is routed; a 409 means it was already handled.
+    comment: Only a mail this listener has just claimed goes to its business sequence.
     condition: route_needed
     ↓call_route [steps.SequenceStep-1791305848663]: 
       comment: Routes the new mail.
@@ -176,6 +402,8 @@ responseTimeout: 3600
         description: From the JavaScript scope (track)
       ↓business_sequence [variables.StepVariable-1791380868967]: 
         description: From the JavaScript scope (mail_ingest variable)
+      ↓procid [variables.StepVariable-1791477482403]: 
+        description: From the JavaScript scope (track)
     ↓src_route_result [steps.JsonSourceStep-1791469385436]: 
       comment: Summary returned by mail_route (null when mail_route itself failed).
       sourceDefinition: 
@@ -212,16 +440,17 @@ responseTimeout: 3600
           mail_entry.error = "routing failed, left pending for mail_replay: " + String(route_error || "no response");
         }'
 ↓compute_state [steps.SimpleStep-1791305813299]: 
-  comment: Finalises the cursor and builds the state-inbox update.
+  comment: Finalises the cursor and builds the state-<listener> update.
   expression: |
     '// Nothing left on the server and no failure: jump to uid_next - 1 so UID gaps are not fetched again.
     // The running flag (anti-overlap lock) belongs to mail_poll and is not touched here.
     if (!cursor_blocked && String(has_more) != "true" && Number(uid_next) > 0) {
       cursor_uid = Math.max(cursor_uid, Number(uid_next) - 1);
     }
-    _id = "state-inbox";
+    _id = "state-" + listener;
     _use_json_base = JSON.stringify({
       type: "state",
+      listener: listener,
       lastUid: cursor_uid,
       uidValidity: uid_validity == null ? "" : String(uid_validity),
       lastPollAt: new Date().toISOString()
@@ -250,19 +479,19 @@ responseTimeout: 3600
   expression: |
     '// CouchDB reports a failed write as a normal response: fail the run instead of silently keeping a stale cursor.
     if (!/^20[12]$/.test(String(state_save_status))) {
-      throw new Error("state-inbox update failed, HTTP status " + state_save_status);
+      throw new Error("state-" + listener + " update failed, HTTP status " + state_save_status);
     }
     ingest_summary = {
+      listener: listener,
       lastUid: cursor_uid,
       hasMore: String(has_more) == "true",
       fetched: ingest_stats.fetched,
-      saved: ingest_stats.saved,
-      duplicates: ingest_stats.duplicates,
+      stored: ingest_stats.stored,
+      alreadyStored: ingest_stats.alreadyStored,
       storeErrors: ingest_stats.storeErrors,
+      claimed: ingest_stats.claimed,
+      alreadyProcessed: ingest_stats.alreadyProcessed,
       failed: ingest_stats.failed,
-      savedIds: ingest_stats.savedIds,
-      storeErrorIds: ingest_stats.storeErrorIds,
-      failedIds: ingest_stats.failedIds,
       mails: ingest_stats.mails
     };'
 ↓result [steps.JsonToXmlStep-1791305848688]: 
@@ -280,7 +509,7 @@ responseTimeout: 3600
         - ↑mode: PLAIN
         - →→: result
 ↓mails [variables.RequestableVariable-1791305813277]: 
-  description: 'JSON array of mails: [{uid, mailbox, from, fromAddresses, authResults, subject, body, receivedAt, attachments}]'
+  description: 'JSON array of mails: [{key, messageId, uid, mailbox, folder, from, fromAddresses, to, cc, replyTo, deliveredTo, authResults, subject, body, bodyTruncated, sentAt, receivedAt, attachments: [{name, contentType, size, tempPath, bytes, skipped}], contentError}]'
 ↓last_uid [variables.RequestableVariable-1791305813279]: 
   description: Cursor before this batch (highest UID already handled)
 ↓uid_next [variables.RequestableVariable-1791305813281]: 
@@ -291,5 +520,8 @@ responseTimeout: 3600
   description: true when the fetch was capped and mails remain on the server
   value: false
 ↓business_sequence [variables.RequestableVariable-1791380868933]: 
-  description: Business sequence for matched routes (project.sequence), passed to mail_route
+  description: Business sequence that decides how each new mail is handled (project.sequence), passed to mail_route
   value: lib_MailListener.demo_business
+↓listener [variables.RequestableVariable-1791477482302]: 
+  description: Listener id (state-<listener> cursor, proc-<listener>-<key> processing documents)
+  value: inbox

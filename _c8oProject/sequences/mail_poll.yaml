@@ -1,20 +1,30 @@
 accessibility: Private
-comment: 'Scheduled entry point. Takes the state-inbox lock (skips when another run is live), polls the IMAP inbox for mails with uid > lastUid (at most max_per_poll), hands the batch to mail_ingest (store, route, cursor), retries pending / error mails with mail_replay, purges mail documents older than the retention with mail_purge, then releases the lock and records lastError. First run (or UIDVALIDITY change) starts from the current UIDNEXT. Returns a run summary (key result: status ok / failed / skipped, one-line summary, mailbox cursor, counts, one line per mail read with sender, subject and outcome, replay, purge, errors) and logs the one-line summary at INFO. Scheduled outside the project (administration console).'
+comment: 'Scheduled entry point, one Scheduler job per listener. Takes the state-<listener> lock (skips while another run of the same listener is live, on any Convertigo instance), polls the IMAP mailbox of the listener (imap_* variables, defaults = lib_maillistener.imap.* symbols) for mails with uid > lastUid (at most max_per_poll) and writes their attachment files to temp files, hands the batch to mail_ingest (store once, claim for this listener, business sequence, cursor), retries the pending / error mails of the listener with mail_replay, purges old documents with mail_purge, deletes the temp files, then releases the lock and records lastError. First run (or UIDVALIDITY change) starts from the current UIDNEXT. Returns a run summary (key result: status ok / failed / skipped, listener, one-line summary, mailbox cursor, counts, one line per mail read, replay, purge, errors) and logs the one-line summary at INFO.'
 responseTimeout: 3600
 ↓start_run [steps.SimpleStep-1791469424786]: 
-  comment: 'Run bookkeeping for the summary: start time, watched mailbox, sub-sequence results.'
+  comment: 'Run bookkeeping and listener identity: validates listener, sets the state-<listener> id, resets the sub-sequence results and the temp file list.'
   expression: |
-    // Run bookkeeping for the summary built by build_summary (and by the skip outputs).
+    '// Run bookkeeping for the summary built by build_summary (and by the skip outputs), and listener identity: the
+    // state-<listener> document holds its cursor and lock, so several listeners (Scheduler jobs, possibly on several
+    // Convertigo instances) share the database without sharing a cursor.
     run_started_ms = Date.now();
-    run_account = "${lib_maillistener.imap.user=changeme}";
-    run_folder = "${lib_maillistener.imap.folder=INBOX}";
+    listener = String(listener || "inbox").trim();
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(listener)) {
+      throw new Error("listener must be 1 to 40 letters, digits, _ or -: " + listener);
+    }
+    run_account = String(imap_user || "");
+    run_folder = String(imap_folder || "INBOX");
+    state_id = "state-" + listener;
+    _use_docid = state_id;
     ingest_result = null;
     replay_result = null;
     purge_result = null;
+    temp_files = [];'
 ↓get_state [steps.TransactionStep-1791302911098]: 
   comment: Reads the state-inbox document (lastUid cursor + running lock).
   sourceTransaction: lib_MailListener.maillistener.get_document
   ↓_use_docid [variables.StepVariable-1791302919487]: 
+    description: 'From the JavaScript scope (start_run: state-<listener>)'
     value: state-inbox
 ↓read_lastuid [steps.SimpleSourceStep-1791302995700]: 
   comment: Extracts lastUid from the state document.
@@ -52,8 +62,9 @@ responseTimeout: 3600
 ↓prepare_lock [steps.SimpleStep-1791307362423]: 
   comment: Decides whether a live run holds the lock and builds the compare-and-set lock document.
   expression: |
-    '// Anti-overlap lock on state-inbox (running + runningSince), taken with a compare-and-set write: post_document with
-    // the current _rev. A concurrent run gets a 409 and skips; a lock older than lock_ttl_minutes is stale and taken over.
+    '// Anti-overlap lock on state-<listener> (running + runningSince), taken with a compare-and-set write: post_document
+    // with the current _rev. A concurrent run of the same listener, on this Convertigo instance or on another one, gets a
+    // 409 and skips; a lock older than lock_ttl_minutes is stale and taken over.
     // A missing state document comes back as a CouchDB error object without _id.
     var state = (state_doc != null && state_doc._id) ? state_doc : {};
     var lockTtlMs = Math.max(1, Number(lock_ttl_minutes) || 15) * 60000;
@@ -69,9 +80,10 @@ responseTimeout: 3600
       if (key != "_c8oMeta" && key != "_id") { lockDoc[key] = state[key]; }
     }
     lockDoc.type = "state";
+    lockDoc.listener = listener;
     lockDoc.running = true;
     lockDoc.runningSince = new Date().toISOString();
-    _id = "state-inbox";
+    _id = state_id;
     _use_json_base = JSON.stringify(lockDoc);'
 ↓if_lock_busy [steps.IfStep-1791307362435]: 
   comment: 'Another run is in progress: skip this one.'
@@ -83,7 +95,7 @@ responseTimeout: 3600
         - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
         - SmartType: 
           - ↑mode: JS
-          - →→: '({ status: "skipped", summary: "skipped: another run holds the lock since " + lock_holder_since, startedAt: new Date(run_started_ms).toISOString(), reason: "lock_busy", lockedSince: lock_holder_since })'
+          - →→: '({ status: "skipped", listener: listener, summary: "skipped: another run holds the lock since " + lock_holder_since, startedAt: new Date(run_started_ms).toISOString(), reason: "lock_busy", lockedSince: lock_holder_since })'
     key: 
       - xmlizable: 
         - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
@@ -119,7 +131,7 @@ responseTimeout: 3600
         - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
         - SmartType: 
           - ↑mode: JS
-          - →→: '({ status: "skipped", summary: "skipped: lock taken by a concurrent run (HTTP " + lock_status + ")", startedAt: new Date(run_started_ms).toISOString(), reason: "lock_lost" })'
+          - →→: '({ status: "skipped", listener: listener, summary: "skipped: lock taken by a concurrent run (HTTP " + lock_status + ")", startedAt: new Date(run_started_ms).toISOString(), reason: "lock_lost" })'
     key: 
       - xmlizable: 
         - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
@@ -128,29 +140,96 @@ responseTimeout: 3600
           - →→: result
   ↓return_lost [steps.ReturnStep-1791307395827]: 
 ↓fetch_mails [steps.SimpleStep-1791302907429]: 
-  comment: Connects to the IMAP mailbox, fetches mails with uid > lastUid (capped by max_per_poll), extracts sender, Authentication-Results, subject, body (text/plain, else text/html as text, capped) and attachment metadata, and exposes mails, last_uid, uid_next, uid_validity, has_more for call_ingest. Failures go to fetch_error.
+  comment: Connects to the IMAP mailbox of this listener (imap_* variables, defaults = lib_maillistener.imap.* symbols), fetches mails with uid > lastUid (capped by max_per_poll), computes the mail key (Message-ID), extracts sender, recipients (to, cc, replyTo, deliveredTo), Authentication-Results, subject, dates, body (text/plain, else text/html as text, capped), writes the attachment files to temp files, and exposes mails, last_uid, uid_next, uid_validity, has_more for call_ingest. Failures go to fetch_error.
   expression: |
-    '// IMAP fetch (engine-embedded javax.mail). Reads the stored cursor (lastUidVar, uidValidityVar) and hands
-    // mails / last_uid / uid_next / uid_validity / has_more to the call_ingest step variables.
+    '// IMAP fetch (engine-embedded javax.mail) for this listener. The mailbox settings come from the mail_poll variables
+    // imap_host, imap_port, imap_user, imap_folder and imap_password, whose defaults are the lib_maillistener.imap.*
+    // symbols: a Scheduler job overrides them to watch another mailbox. Reads the stored cursor (lastUidVar,
+    // uidValidityVar) and hands mails / last_uid / uid_next / uid_validity / has_more to the call_ingest step variables.
+    // The attachment files are written to temp files now, while the mailbox is open: mail_ingest uploads them when it
+    // stores the mail for the first time, and cleanup_files deletes every temp file at the end of the run.
     // First run (no cursor yet) or UIDVALIDITY change: start from now instead of replaying the mailbox history.
     // Any failure is kept in fetch_error so mail_poll releases its lock and records lastError before failing.
-    var imapHost = "${lib_maillistener.imap.host=imap.gmail.com}";
-    var imapPort = "${lib_maillistener.imap.port=993}";
-    var imapUser = "${lib_maillistener.imap.user=changeme}";
-    var imapFolder = "${lib_maillistener.imap.folder=INBOX}";
+    var imapHost = String(imap_host || "").trim();
+    var imapPort = String(imap_port || "993").trim();
+    var imapUser = String(imap_user || "").trim();
+    var imapFolder = String(imap_folder || "INBOX").trim();
     // The password comes from the masked imap_password variable, never from this source
     var imapPassword = String(imap_password || "");
     var maxPerPoll = Math.max(1, Number(max_per_poll) || 50);
     var maxBodyChars = 200000;
+    var maxRecipients = 100;
+    var maxMb = Number(attachments_max_mb);
+    if (!(maxMb > 0)) {
+      maxMb = 500;
+    }
+    var maxBytes = maxMb * 1024 * 1024;
     var storedLastUid = Number(typeof lastUidVar == "undefined" ? 0 : lastUidVar) || 0;
     var storedUidValidity = (typeof uidValidityVar == "undefined" || uidValidityVar == null) ? "" : String(uidValidityVar);
     
+    // Mail identity shared by every listener: SHA-256 of the Message-ID header, or of mailbox / folder / UIDVALIDITY /
+    // UID when the mail has none. The same mail read twice, or by several listeners, maps to the same mail-<key> document.
+    function mailKey(messageId, validity, uid) {
+      var source = messageId != "" ? "message-id:" + messageId
+        : "uid:" + imapUser.toLowerCase() + "/" + imapFolder + "/" + validity + "/" + uid;
+      var digest = java.security.MessageDigest.getInstance("SHA-256").digest(new java.lang.String(source).getBytes("UTF-8"));
+      var hex = "";
+      for (var h = 0; h < 16; h++) {
+        hex += ("0" + (digest[h] & 0xff).toString(16)).slice(-2);
+      }
+      return hex;
+    }
+    
+    // Bare lowercase addresses of an address header (groups such as undisclosed-recipients are skipped), at most
+    // maxRecipients of them.
+    function addressList(list) {
+      var out = [];
+      if (list) {
+        for (var r = 0; r < list.length && out.length < maxRecipients; r++) {
+          var address = typeof list[r].getAddress == "function" ? String(list[r].getAddress() || "") : "";
+          if (address.indexOf("@") > 0) { out.push(address.toLowerCase()); }
+        }
+      }
+      return out;
+    }
+    
+    // The content handlers of the embedded javax.mail can be missing for the calling thread: getContent() then returns a
+    // raw stream instead of a Multipart or a String. Multipart and text parts are decoded from their data source or
+    // stream in that case, so the body and the attachments never depend on them.
+    function asMultipart(part) {
+      var raw = part.getContent();
+      if (raw instanceof javax.mail.Multipart) {
+        return raw;
+      }
+      if (raw instanceof java.io.InputStream) { try { raw.close(); } catch (e) {} }
+      return new javax.mail.internet.MimeMultipart(part.getDataHandler().getDataSource());
+    }
+    function asText(part) {
+      var raw = part.getContent();
+      if (typeof raw == "string" || raw instanceof java.lang.String) {
+        return String(raw);
+      }
+      if (raw instanceof java.io.InputStream) { try { raw.close(); } catch (e) {} }
+      var charset = "UTF-8";
+      try {
+        var declared = new javax.mail.internet.ContentType(part.getContentType()).getParameter("charset");
+        if (declared) { charset = javax.mail.internet.MimeUtility.javaCharset(declared); }
+      } catch (e) {}
+      var input = part.getInputStream();
+      try {
+        return String(new java.lang.String(input.readAllBytes(), charset));
+      } finally {
+        try { input.close(); } catch (e) {}
+      }
+    }
+    
     // MIME walk: the first text/plain part is the body, text/html is the fallback (tags stripped); parts with a file
-    // name, an attachment disposition or an embedded message are listed as attachments (metadata only, not stored).
+    // name, an attachment disposition or an embedded message are attachments (metadata, and the part for saveParts).
     function extractContent(message, maxChars) {
       var text = null;
       var html = null;
       var attachments = [];
+      var parts = [];
       var walk = function (part) {
         var disposition = String(part.getDisposition() || "").toLowerCase();
         var fileName = "";
@@ -160,7 +239,7 @@ responseTimeout: 3600
           fileName = String(part.getFileName() || "");
         }
         if (part.isMimeType("multipart/*")) {
-          var multipart = part.getContent();
+          var multipart = asMultipart(part);
           for (var k = 0; k < multipart.getCount(); k++) { walk(multipart.getBodyPart(k)); }
         } else if (disposition == "attachment" || fileName != "" || part.isMimeType("message/rfc822")) {
           attachments.push({
@@ -168,10 +247,11 @@ responseTimeout: 3600
             contentType: String(part.getContentType() || "").split(";")[0].trim().toLowerCase(),
             size: Number(part.getSize())
           });
+          parts.push(part);
         } else if (text == null && part.isMimeType("text/plain")) {
-          try { text = String(part.getContent()); } catch (e) {}
+          try { text = asText(part); } catch (e) {}
         } else if (html == null && part.isMimeType("text/html")) {
-          try { html = String(part.getContent()); } catch (e) {}
+          try { html = asText(part); } catch (e) {}
         }
       };
       walk(message);
@@ -187,7 +267,53 @@ responseTimeout: 3600
           .replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
       }
       var truncated = body.length > maxChars;
-      return { body: truncated ? body.substring(0, maxChars) : body, bodyTruncated: truncated, attachments: attachments };
+      return { body: truncated ? body.substring(0, maxChars) : body, bodyTruncated: truncated, attachments: attachments, parts: parts };
+    }
+    
+    // Writes each attachment part to a temp file (tempPath, bytes). A part above attachments_max_mb is not kept and is
+    // listed with skipped = "too_large"; a part that cannot be read is listed with skipped = "download_failed".
+    var buffer = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 65536);
+    function saveParts(content) {
+      for (var p = 0; p < content.parts.length; p++) {
+        var meta = content.attachments[p];
+        var file = null;
+        try {
+          var part = content.parts[p];
+          // getSize() is the encoded (base64) size: skip without downloading when the decoded file is surely too big
+          if (Number(part.getSize()) * 0.73 > maxBytes) {
+            meta.skipped = "too_large";
+            continue;
+          }
+          file = java.io.File.createTempFile("maillistener-", ".att");
+          file.deleteOnExit();
+          temp_files.push(String(file.getAbsolutePath()));
+          var input = part.getInputStream();
+          var output = new java.io.FileOutputStream(file);
+          var total = 0;
+          var tooLarge = false;
+          try {
+            var read;
+            while ((read = input.read(buffer)) != -1) {
+              total += read;
+              if (total > maxBytes) { tooLarge = true; break; }
+              output.write(buffer, 0, read);
+            }
+          } finally {
+            try { output.close(); } catch (e) {}
+            try { input.close(); } catch (e) {}
+          }
+          if (tooLarge) {
+            file["delete"]();
+            meta.skipped = "too_large";
+          } else {
+            meta.tempPath = String(file.getAbsolutePath());
+            meta.bytes = total;
+          }
+        } catch (e) {
+          if (file != null) { try { file["delete"](); } catch (e2) {} }
+          meta.skipped = "download_failed";
+        }
+      }
     }
     
     var fetched = [];
@@ -199,8 +325,11 @@ responseTimeout: 3600
     var inbox = null;
     fetch_error = "";
     try {
+      if (imapHost == "" || imapUser == "") {
+        throw new Error("IMAP host or user not configured: define the lib_maillistener.imap.* symbols or set imap_host / imap_user");
+      }
       if (imapPassword == "") {
-        throw new Error("IMAP password not configured: define the lib_maillistener.imap.password.secret symbol");
+        throw new Error("IMAP password not configured: define the lib_maillistener.imap.password.secret symbol or set imap_password");
       }
       var props = new java.util.Properties();
       props.put("mail.store.protocol", "imaps");
@@ -237,26 +366,62 @@ responseTimeout: 3600
               }
             }
           } catch (e) {}
+          // Recipients: To and Cc, Reply-To (where replies go; javax.mail answers the sender when the header is absent) and
+          // Delivered-To (the address the mailbox received the mail for, topmost first: it tells which alias or group got
+          // it, and is the only trace of a Bcc recipient)
+          var to = [];
+          var cc = [];
+          var replyTo = [];
+          var deliveredTo = [];
+          try { to = addressList(m.getRecipients(javax.mail.Message.RecipientType.TO)); } catch (e) {}
+          try { cc = addressList(m.getRecipients(javax.mail.Message.RecipientType.CC)); } catch (e) {}
+          try { replyTo = addressList(m.getReplyTo()); } catch (e) {}
+          try {
+            var dt = m.getHeader("Delivered-To");
+            if (dt) {
+              for (var t = 0; t < dt.length && deliveredTo.length < maxRecipients; t++) { deliveredTo.push(String(dt[t]).trim().toLowerCase()); }
+            }
+          } catch (e) {}
           // Topmost Authentication-Results header only: the one added by our receiving server (checked in mail_ingest)
           var authResults = "";
           try { var arh = m.getHeader("Authentication-Results"); if (arh && arh.length > 0) { authResults = String(arh[0]); } } catch (e) {}
+          var messageId = "";
+          try { messageId = String(m.getMessageID() || "").trim(); } catch (e) {}
           var subject = "";
           try { subject = String(m.getSubject()); } catch (e) {}
+          var sentAt = "";
+          try { var sd = m.getSentDate(); if (sd) { sentAt = new Date(sd.getTime()).toISOString(); } } catch (e) {}
           var receivedAt = "";
           try { var d = m.getReceivedDate(); if (d) { receivedAt = new Date(d.getTime()).toISOString(); } } catch (e) {}
-          var content = { body: "", bodyTruncated: false, attachments: [] };
-          try { content = extractContent(m, maxBodyChars); } catch (e) {}
+          var content = { body: "", bodyTruncated: false, attachments: [], parts: [] };
+          var contentError = "";
+          try {
+            content = extractContent(m, maxBodyChars);
+          } catch (e) {
+            contentError = String(e && e.message ? e.message : e);
+            try { log.warn("mail_poll " + listener + ": content of UID " + uid + " could not be read: " + contentError); } catch (e2) {}
+          }
+          saveParts(content);
           fetched.push({
+            key: mailKey(messageId, uidValidity, uid),
+            messageId: messageId,
             uid: uid,
             mailbox: imapUser,
+            folder: imapFolder,
             from: from,
             fromAddresses: fromAddresses,
+            to: to,
+            cc: cc,
+            replyTo: replyTo,
+            deliveredTo: deliveredTo,
             authResults: authResults,
             subject: subject,
             body: content.body,
             bodyTruncated: content.bodyTruncated,
+            sentAt: sentAt,
             receivedAt: receivedAt,
-            attachments: content.attachments
+            attachments: content.attachments,
+            contentError: contentError
           });
         }
       }
@@ -290,6 +455,8 @@ responseTimeout: 3600
       description: From the JavaScript scope (fetch_mails)
     ↓business_sequence [variables.StepVariable-1791380868991]: 
       description: From the JavaScript scope (mail_poll variable)
+    ↓listener [variables.StepVariable-1791477316752]: 
+      description: From the JavaScript scope (start_run)
   ↓src_ingest_error [steps.SimpleSourceStep-1791307395833]: 
     comment: Error raised by mail_ingest (null when it succeeded).
     sourceDefinition: 
@@ -317,6 +484,8 @@ responseTimeout: 3600
     sourceSequence: lib_MailListener.mail_replay
     ↓business_sequence [variables.StepVariable-1791380869001]: 
       description: From the JavaScript scope (mail_poll variable)
+    ↓listener [variables.StepVariable-1791477316770]: 
+      description: From the JavaScript scope (start_run)
   ↓src_replay_error [steps.SimpleSourceStep-1791307395840]: 
     comment: Error raised by mail_replay (null when it succeeded).
     sourceDefinition: 
@@ -339,6 +508,15 @@ responseTimeout: 3600
           - java.lang.String: 
             - ↑value: ./document/result
     variableName: replay_result
+↓cleanup_files [steps.SimpleStep-1791477316782]: 
+  comment: Deletes every temp file written by fetch_mails, uploaded or not.
+  expression: |
+    '// Deletes the attachment temp files written by fetch_mails, whatever happened in mail_ingest.
+    var leftFiles = temp_files || [];
+    for (var f = 0; f < leftFiles.length; f++) {
+      try { new java.io.File(String(leftFiles[f]))["delete"](); } catch (e) {}
+    }
+    temp_files = [];'
 ↓call_purge [steps.SequenceStep-1791376420190]: 
   comment: Retention purge (runs even when the IMAP fetch failed).
   sourceSequence: lib_MailListener.mail_purge
@@ -367,14 +545,15 @@ responseTimeout: 3600
 ↓prepare_release [steps.SimpleStep-1791307362479]: 
   comment: Builds the lock release with the outcome of the run.
   expression: |
-    '// Releases the lock and records the outcome of the run in state-inbox (lastError is empty when everything went fine).
+    '// Releases the lock and records the outcome of the run in state-<listener> (lastError is empty when everything went
+    // fine).
     var runErrors = [];
     if (String(fetch_error || "") != "") { runErrors.push("fetch: " + fetch_error); }
     if (String(ingest_error || "") != "") { runErrors.push("ingest: " + ingest_error); }
     if (String(replay_error || "") != "") { runErrors.push("replay: " + replay_error); }
     if (String(purge_error || "") != "") { runErrors.push("purge: " + purge_error); }
     run_error = runErrors.join(" | ").substring(0, 2000);
-    _id = "state-inbox";
+    _id = state_id;
     _use_json_base = JSON.stringify({ running: false, runningSince: "", lastRunAt: new Date().toISOString(), lastError: run_error });
     release_status = "";'
 ↓release_lock [steps.TransactionStep-1791307362484]: 
@@ -421,13 +600,15 @@ responseTimeout: 3600
       hasMore: fetchOk && String(has_more) == "true"
     };
     
-    // Mails read by this run, one line each (status: routed, unmatched, error, pending, already_stored, store_error,
-    // not_saved)
+    // Mails read by this run, one line each. status: routed, unmatched, error, pending (outcome for this listener),
+    // already_processed (this listener had handled it before), store_error, not_saved; stored: true when this read
+    // stored the mail in the database for the first time.
     var newMails = ingest ? asList(ingest.mails) : [];
-    var counts = { read: newMails.length, routed: 0, unmatched: 0, error: 0, pending: 0, alreadyStored: 0, storeError: 0, notSaved: 0 };
-    var statusKeys = { routed: "routed", unmatched: "unmatched", error: "error", pending: "pending", already_stored: "alreadyStored", store_error: "storeError", not_saved: "notSaved" };
+    var counts = { read: newMails.length, stored: 0, routed: 0, unmatched: 0, error: 0, pending: 0, alreadyProcessed: 0, storeError: 0, notSaved: 0 };
+    var statusKeys = { routed: "routed", unmatched: "unmatched", error: "error", pending: "pending", already_processed: "alreadyProcessed", store_error: "storeError", not_saved: "notSaved" };
     for (var i = 0; i < newMails.length; i++) {
       counts[statusKeys[String(newMails[i].status)] || "error"]++;
+      if (String(newMails[i].stored) == "true") { counts.stored++; }
     }
     if (ingest == null && fetchOk) {
       // mail_ingest failed as a whole: the outcome per mail is unknown, only the number of fetched mails is reported
@@ -438,6 +619,7 @@ responseTimeout: 3600
       retried: num(replay.retried),
       routed: num(replay.routed),
       unmatched: num(replay.unmatched),
+      pending: num(replay.pending),
       errors: num(replay.errors),
       skippedMaxAttempts: num(replay.skippedMaxAttempts),
       mails: asList(replay.mails)
@@ -447,6 +629,7 @@ responseTimeout: 3600
       cutoff: String(purge.cutoff || ""),
       expired: num(purge.expired),
       deleted: num(purge.deleted),
+      conflicts: num(purge.conflicts),
       failed: num(purge.failed),
       hasMore: String(purge.hasMore) == "true"
     };
@@ -458,8 +641,8 @@ responseTimeout: 3600
     if (String(purge_error || "") != "") { errors.push("purge: " + purge_error); }
     if (!/^20[12]$/.test(String(release_status))) { errors.push("lock release failed, HTTP status " + release_status); }
     
-    // One-line summary, for example: "3 mails read (1 routed, 1 unmatched, 1 already stored); replay: 1 retried
-    // (1 routed, 0 unmatched, 0 in error); purge: 4 deleted; 2.4 s"
+    // One-line summary, for example: "3 mails read (1 routed, 1 unmatched, 1 already processed), 2 stored for the first
+    // time; replay: 1 retried (1 routed, 0 unmatched, 0 pending, 0 in error); purge: 4 deleted; 2.4 s"
     var parts = [];
     if (!fetchOk) {
       parts.push("mailbox not read");
@@ -468,15 +651,16 @@ responseTimeout: 3600
     } else {
       var details = [];
       var labels = [["routed", "routed"], ["unmatched", "unmatched"], ["error", "in error"], ["pending", "left pending"],
-        ["alreadyStored", "already stored"], ["storeError", "rejected by the database"], ["notSaved", "not saved"]];
+        ["alreadyProcessed", "already processed"], ["storeError", "rejected by the database"], ["notSaved", "not saved"]];
       for (var l = 0; l < labels.length; l++) {
         if (counts[labels[l][0]] > 0) { details.push(counts[labels[l][0]] + " " + labels[l][1]); }
       }
-      parts.push(counts.read + (counts.read == 1 ? " mail read" : " mails read") + (details.length > 0 ? " (" + details.join(", ") + ")" : ""));
+      parts.push(counts.read + (counts.read == 1 ? " mail read" : " mails read") + (details.length > 0 ? " (" + details.join(", ") + ")" : "")
+        + ", " + counts.stored + " stored for the first time");
     }
     if (mailbox.hasMore) { parts.push("more mails waiting for the next run"); }
     if (replaySummary != null && replaySummary.retried > 0) {
-      parts.push("replay: " + replaySummary.retried + " retried (" + replaySummary.routed + " routed, " + replaySummary.unmatched + " unmatched, " + replaySummary.errors + " in error)");
+      parts.push("replay: " + replaySummary.retried + " retried (" + replaySummary.routed + " routed, " + replaySummary.unmatched + " unmatched, " + replaySummary.pending + " pending, " + replaySummary.errors + " in error)");
     }
     if (replaySummary != null && replaySummary.skippedMaxAttempts > 0) {
       parts.push(replaySummary.skippedMaxAttempts + " left in error after max attempts");
@@ -489,6 +673,7 @@ responseTimeout: 3600
     
     run_summary = {
       status: errors.length > 0 ? "failed" : "ok",
+      listener: listener,
       summary: summaryText,
       startedAt: new Date(run_started_ms).toISOString(),
       finishedAt: new Date(finishedMs).toISOString(),
@@ -517,7 +702,7 @@ responseTimeout: 3600
         - →→: result
 ↓log_summary [steps.LogStep-1791469613800]: 
   comment: Writes the one-line run summary (counts and errors, no mail content) in the Context logger at INFO. A failed run also logs it at ERROR through the check_run exception.
-  expression: '"mail_poll " + run_summary.status + ": " + run_summary.summary'
+  expression: '"mail_poll " + listener + " " + run_summary.status + ": " + run_summary.summary'
 ↓check_run [steps.SimpleStep-1791307362491]: 
   comment: Fails the run (visible in the Scheduler log) once the lock is released; the exception message is the one-line summary.
   expression: |
@@ -531,7 +716,7 @@ responseTimeout: 3600
   value: 50
 ↓imap_password [variables.RequestableVariable-1791306431620]: 
   comment: Masked in logs, Studio and platform. The project file only holds the symbol reference; the secret itself lives in the engine symbol lib_maillistener.imap.password.secret (stored ciphered thanks to the .secret suffix).
-  description: 'IMAP password (Gmail: app password), provided by the lib_maillistener.imap.password.secret symbol'
+  description: 'Mailbox password (default: symbol lib_maillistener.imap.password.secret). Masked in logs; to override it on a Scheduler job, prefer a .secret symbol of your own project'
   value: 
     - ↑traceable: false
     - →→: ${lib_maillistener.imap.password.secret=}
@@ -542,3 +727,21 @@ responseTimeout: 3600
 ↓business_sequence [variables.RequestableVariable-1791380868952]: 
   description: Business sequence called for each matched mail, as project.sequence (a sequence of any loaded project); it receives docid and route
   value: lib_MailListener.demo_business
+↓listener [variables.RequestableVariable-1791477316539]: 
+  description: 'Listener id (1 to 40 letters, digits, _ or -): one per Scheduler job. It owns the state-<listener> document (cursor, lock) and its processing documents; listeners share the stored mails'
+  value: inbox
+↓imap_host [variables.RequestableVariable-1791477316555]: 
+  description: 'IMAP server (default: symbol lib_maillistener.imap.host)'
+  value: ${lib_maillistener.imap.host=imap.gmail.com}
+↓imap_port [variables.RequestableVariable-1791477316561]: 
+  description: 'IMAPS port (default: symbol lib_maillistener.imap.port)'
+  value: ${lib_maillistener.imap.port=993}
+↓imap_user [variables.RequestableVariable-1791477316607]: 
+  description: 'Mailbox login (default: symbol lib_maillistener.imap.user)'
+  value: ${lib_maillistener.imap.user=changeme}
+↓imap_folder [variables.RequestableVariable-1791477316639]: 
+  description: 'Folder or Gmail label to watch (default: symbol lib_maillistener.imap.folder)'
+  value: ${lib_maillistener.imap.folder=INBOX}
+↓attachments_max_mb [variables.RequestableVariable-1791477316652]: 
+  description: Maximum size of one stored attachment file in MB (decimals allowed; invalid or non-positive value means 500)
+  value: ${lib_maillistener.attachments.max_mb=500}

@@ -1,9 +1,17 @@
 accessibility: Private
-comment: Retries mails left pending (interrupted run) or in error (business sequence failure) through mail_route, until max_attempts routing attempts. store_error mails are not retried. Called by mail_poll under its lock; callable alone in Studio.
+comment: Retries the processing documents of one listener left pending (interrupted run, attachment files still being stored by another listener) or in error (business sequence failure) through mail_route, until max_attempts business attempts. store_error mails are not retried. Called by mail_poll under its lock; callable alone in Studio.
 responseTimeout: 3600
+↓prepare_find [steps.SimpleStep-1791477593485]: 
+  comment: Builds the Mango selector of the listener for find.
+  expression: |
+    '// Only the processing documents of this listener: each listener retries its own mails with its own business sequence.
+    listener = String(listener || "inbox").trim();
+    _use_selector = JSON.stringify({ type: "processing", listener: listener, status: { "$in": ["pending", "error"] } });'
 ↓find [steps.TransactionStep-1791307158976]: 
-  comment: Loads the pending / error mails (50 at most per run).
+  comment: Loads the pending / error processing documents of the listener (50 at most per run).
   sourceTransaction: lib_MailListener.maillistener.find_retry_candidates
+  ↓_use_selector [variables.StepVariable-1791477593493]: 
+    description: From the JavaScript scope (prepare_find)
 ↓read_candidates [steps.JsonSourceStep-1791307190981]: 
   comment: Candidate documents as a JS array (null when none).
   sourceDefinition: 
@@ -18,27 +26,29 @@ responseTimeout: 3600
 ↓select [steps.SimpleStep-1791307190989]: 
   comment: Keeps the candidates below max_attempts.
   expression: |
-    '// Retries mails left pending (interrupted run) or in error (business failure) until max_attempts is reached.
+    '// Retries the processing documents of this listener left pending (interrupted run, attachment files still being
+    // stored) or in error (business failure) until max_attempts is reached.
     var maxAttempts = Math.max(1, Number(max_attempts) || 3);
     var found = candidates || [];
     retry_list = [];
-    replay_stats = { candidates: found.length, retried: 0, routed: 0, unmatched: 0, errors: 0, skippedMaxAttempts: 0, retriedIds: [], errorIds: [], mails: [] };
+    replay_stats = { listener: listener, candidates: found.length, retried: 0, routed: 0, unmatched: 0, pending: 0, errors: 0, skippedMaxAttempts: 0, retriedIds: [], errorIds: [], mails: [] };
     for (var c = 0; c < found.length; c++) {
       if ((Number(found[c].attempts) || 0) < maxAttempts) {
-        retry_list.push(String(found[c]._id));
+        retry_list.push({ procid: String(found[c]._id), docid: String(found[c].mailId) });
       } else {
         replay_stats.skippedMaxAttempts++;
       }
     }'
 ↓foreach_retry [steps.SimpleIteratorStep-1791307191002]: 
-  comment: Routes each retained mail again (item = docid).
+  comment: Hands each retained mail to mail_route again (item = {procid, docid}).
   expression: retry_list
   ↓set_docid [steps.SimpleStep-1791307191004]: 
-    comment: Exposes docid for call_route.
+    comment: Exposes docid and procid for call_route.
     expression: |
-      docid = String(item);
+      docid = String(item.docid);
+      procid = String(item.procid);
       replay_stats.retried++;
-      replay_stats.retriedIds.push(docid);
+      replay_stats.retriedIds.push(procid);
       replayed_status = "";
   ↓call_route [steps.SequenceStep-1791307191006]: 
     comment: Routes the mail again (attempts is incremented by mail_route).
@@ -47,6 +57,8 @@ responseTimeout: 3600
       description: From the JavaScript scope (set_docid)
     ↓business_sequence [variables.StepVariable-1791380868982]: 
       description: From the JavaScript scope (mail_replay variable)
+    ↓procid [variables.StepVariable-1791477593525]: 
+      description: From the JavaScript scope (set_docid)
   ↓read_route_status [steps.SimpleSourceStep-1791307205111]: 
     comment: Status written by mail_route (null when mail_route itself failed).
     sourceDefinition: 
@@ -89,13 +101,16 @@ responseTimeout: 3600
         replay_stats.routed++;
       } else if (outcome == "unmatched") {
         replay_stats.unmatched++;
+      } else if (outcome == "pending") {
+        replay_stats.pending++;
       } else {
         replay_stats.errors++;
-        replay_stats.errorIds.push(docid);
+        replay_stats.errorIds.push(procid);
       }
       var routed = (route_result != null && typeof route_result == "object") ? route_result : null;
       replay_stats.mails.push({
         docid: docid,
+        procid: procid,
         from: routed ? String(routed.from || "") : "",
         senderVerified: routed ? String(routed.senderVerified) == "true" : null,
         subject: routed ? String(routed.subject || "") : "",
@@ -123,5 +138,8 @@ responseTimeout: 3600
   description: Maximum routing attempts per mail before it is left in error for a manual look
   value: 3
 ↓business_sequence [variables.RequestableVariable-1791380868945]: 
-  description: Business sequence for matched routes (project.sequence), passed to mail_route
+  description: Business sequence that decides how each retried mail is handled (project.sequence), passed to mail_route
   value: lib_MailListener.demo_business
+↓listener [variables.RequestableVariable-1791477593474]: 
+  description: 'Listener id: only its processing documents are retried, with its business sequence'
+  value: inbox

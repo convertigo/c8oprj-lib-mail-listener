@@ -1,5 +1,5 @@
 accessibility: Private
-comment: 'Routes a stored mail document based on rules, then writes status/route/routedAt/attempts/error back on the document. Input: docid (mail-<uid>), business_sequence (project.sequence, default lib_MailListener.demo_business). V1 rules: rule_urgent (subject contains URGENT, any sender), rule_domain (DMARC-authenticated sender from convertigo.com, exact domain). A matched mail first gets its attachment files stored (mail_store_attachments), then business_sequence is called with docid and route. No match: unmatched (attachments not stored). Attachment or business failure: error, retried by mail_replay.'
+comment: 'Hands a stored mail to the business sequence of one listener, which decides how it is handled, then writes status/route/routedAt/attempts/error on the processing document of that listener. Input: docid (mail-<key>), procid (proc-<listener>-<key>), business_sequence (project.sequence, default lib_MailListener.demo_business). The business sequence returns a decision element: route not empty = routed with that route, empty = unmatched. While another listener is still uploading the attachment files of the mail (attachmentsStatus storing, less than one hour), the business sequence is not called and the status stays pending. Business failure (exception, XMLErrorStep, sequence not found, project not loaded, no decision element): error, retried by mail_replay.'
 responseTimeout: 3600
 ↓inputVars [steps.InputVariablesStep-1791304583584]: 
   comment: Exposes the sequence input variables (docid) as XML so later steps can source them.
@@ -15,17 +15,18 @@ responseTimeout: 3600
             - ↑value: 1791304583584
           - java.lang.String: 
             - ↑value: ./docid/text()
-↓src_from [steps.SimpleSourceStep-1791303068450]: 
-  comment: Extracts from.
-  sourceDefinition: 
-    - xmlizable: 
-      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-      - com.twinsoft.convertigo.beans.common.XMLVector: 
-        - java.lang.String: 
-          - ↑value: 1791303053796
-        - java.lang.String: 
-          - ↑value: ./document/couchdb_output/from/text()
-  variableName: from_var
+↓get_proc [steps.TransactionStep-1791477524062]: 
+  comment: Loads the processing document of the listener by procid.
+  sourceTransaction: lib_MailListener.maillistener.get_document
+  ↓_use_docid [variables.StepVariable-1791477524064]: 
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791304583584
+          - java.lang.String: 
+            - ↑value: ./procid/text()
 ↓src_subject [steps.SimpleSourceStep-1791303068469]: 
   comment: Extracts subject.
   sourceDefinition: 
@@ -37,17 +38,6 @@ responseTimeout: 3600
         - java.lang.String: 
           - ↑value: ./document/couchdb_output/subject/text()
   variableName: subject_var
-↓src_body [steps.SimpleSourceStep-1791303068487]: 
-  comment: Extracts body.
-  sourceDefinition: 
-    - xmlizable: 
-      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-      - com.twinsoft.convertigo.beans.common.XMLVector: 
-        - java.lang.String: 
-          - ↑value: 1791303053796
-        - java.lang.String: 
-          - ↑value: ./document/couchdb_output/body/text()
-  variableName: body_var
 ↓src_mail_status [steps.SimpleSourceStep-1791305848704]: 
   comment: HTTP status of get_mail (200 when the document exists).
   sourceDefinition: 
@@ -81,8 +71,8 @@ responseTimeout: 3600
         - java.lang.String: 
           - ↑value: ./document/couchdb_output/senderVerified/text()
   variableName: sender_verified_var
-↓src_attempts [steps.SimpleSourceStep-1791307086322]: 
-  comment: Routing attempts already made on this mail (absent = 0).
+↓src_attachments_status [steps.SimpleSourceStep-1791477524069]: 
+  comment: attachmentsStatus of the mail (storing while the listener that stored it uploads the files).
   sourceDefinition: 
     - xmlizable: 
       - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
@@ -90,72 +80,80 @@ responseTimeout: 3600
         - java.lang.String: 
           - ↑value: 1791303053796
         - java.lang.String: 
+          - ↑value: ./document/couchdb_output/attachmentsStatus/text()
+  variableName: attachments_status_var
+↓src_storing_since [steps.SimpleSourceStep-1791477524076]: 
+  comment: Start of the attachment upload (empty once finished).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791303053796
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/storingSince/text()
+  variableName: storing_since_var
+↓src_proc_status [steps.SimpleSourceStep-1791477560711]: 
+  comment: HTTP status of get_proc (200 when the processing document exists).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791477524062
+        - java.lang.String: 
+          - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
+  variableName: proc_http_status
+↓src_attempts [steps.SimpleSourceStep-1791307086322]: 
+  comment: Business attempts already made by this listener on this mail (absent = 0).
+  sourceDefinition: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+      - com.twinsoft.convertigo.beans.common.XMLVector: 
+        - java.lang.String: 
+          - ↑value: 1791477524062
+        - java.lang.String: 
           - ↑value: ./document/couchdb_output/attempts/text()
   variableName: attempts_var
 ↓read_mail_fields [steps.SimpleStep-1791303057423]: 
-  comment: Checks the mail exists, decides the route (V1 rules) and resolves the business sequence target. Sets route_var, status_var, __project, __sequence, route.
+  comment: Checks the mail and the processing document exist, decides whether to wait for attachment files still being stored, and resolves the business sequence target (project.sequence; mail_* and admin_* sequences of this library are refused).
   expression: |
-    '// Decides the route (V1 rules) from the fields exposed by the src_* steps. Sets route_var and status_var.
+    '// Checks the mail and the processing document exist, waits for attachment files still being stored by another
+    // listener, and resolves the business sequence, which decides how the mail is handled.
     if (String(mail_http_status) != "200") {
       throw new Error("Mail document " + docid + " not found (HTTP " + mail_http_status + ")");
     }
-    var subject = String(subject_var);
-    var body = String(body_var);
-    // Sender identity: the bare address (never the display name) and the DMARC verdict computed by mail_ingest
-    var fromAddress = (typeof from_address_var == "undefined" || from_address_var == null) ? "" : String(from_address_var).toLowerCase();
-    var fromDomain = fromAddress.substring(fromAddress.lastIndexOf("@") + 1);
-    var senderVerified = typeof sender_verified_var != "undefined" && String(sender_verified_var) == "true";
-    // Attempts so far (mail_replay retries until max_attempts); the attachment and business calls fill the *_error vars
+    if (String(proc_http_status) != "200") {
+      throw new Error("Processing document " + procid + " not found (HTTP " + proc_http_status + ")");
+    }
+    // Attempts so far (mail_replay retries until max_attempts); the business call fills the business_* vars
     mail_attempts = Number(typeof attempts_var == "undefined" ? 0 : attempts_var) || 0;
-    attachments_error = "";
     business_error_message = "";
     business_error_details = "";
-    var decided = "";
-    // Rule 1: subject contains URGENT (content rule: any sender can trigger it)
-    if (subject.toUpperCase().indexOf("URGENT") >= 0) {
-      decided = "rule_urgent";
-    }
-    // Rule 2: authenticated sender from a given domain (example: convertigo.com), exact domain match
-    else if (senderVerified && fromDomain == "convertigo.com") {
-      decided = "rule_domain";
-    }
-    route_var = decided;
-    status_var = (decided === "") ? "unmatched" : "routed";
+    business_decision = null;
+    // The listener that stored the mail uploads its attachment files right after creating it (attachmentsStatus
+    // storing): the business sequence is called once they are there, unless the upload looks abandoned (one hour).
+    var storingSince = Date.parse(String(storing_since_var || "")) || 0;
+    wait_for_files = String(attachments_status_var) == "storing" && (Date.now() - storingSince) < 60 * 60000;
     
     // Business sequence target "project.sequence" (business_sequence variable, set on mail_poll). call_business keeps
     // demo_business as design-time target; its __project / __sequence step variables redirect the call at runtime.
+    // A mail_* or admin_* sequence of this library is refused: it would loop or bypass the admin check.
     var businessTarget = String(business_sequence || "lib_MailListener.demo_business").trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$/.test(businessTarget) || /^lib_MailListener\.(mail_|admin_)/.test(businessTarget)) {
+      throw new Error("business_sequence must be project.sequence and must not be a mail_* or admin_* sequence of lib_MailListener: " + businessTarget);
+    }
     var targetDot = businessTarget.indexOf(".");
-    __project = targetDot > 0 ? businessTarget.substring(0, targetDot) : "lib_MailListener";
-    __sequence = targetDot > 0 ? businessTarget.substring(targetDot + 1) : businessTarget;
-    route = decided;'
-↓if_store_attachments [steps.IfStep-1791380027906]: 
-  comment: A matched mail gets its attachment files stored before the business sequence runs.
-  condition: route_var != ""
-  ↓call_store_attachments [steps.SequenceStep-1791380027908]: 
-    comment: Stores the attachment files (no-op without attachments or when already stored).
-    sourceSequence: lib_MailListener.mail_store_attachments
-    ↓docid [variables.StepVariable-1791380027910]: 
-      description: From the JavaScript scope (mail_route docid)
-  ↓src_attachments_error [steps.SimpleSourceStep-1791380045664]: 
-    comment: Error raised by mail_store_attachments (null when it succeeded).
-    sourceDefinition: 
-      - xmlizable: 
-        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
-        - com.twinsoft.convertigo.beans.common.XMLVector: 
-          - java.lang.String: 
-            - ↑value: 1791380027908
-          - java.lang.String: 
-            - ↑value: ./document/error/details/text()
-    variableName: attachments_error
-↓if_business [steps.IfStep-1791380869031]: 
-  comment: A matched mail whose attachments are stored is handed to the business sequence.
-  condition: route_var != "" && String(attachments_error || "") == ""
+    __project = businessTarget.substring(0, targetDot);
+    __sequence = businessTarget.substring(targetDot + 1);'
+↓if_call_business [steps.IfStep-1791477560743]: 
+  comment: 'The attachment files are there (or the upload looks abandoned): call the business sequence.'
+  condition: '!wait_for_files'
   ↓reset_business [steps.SimpleStep-1791380989034]: 
     comment: Marks the business call as attempted; src_business_document then tells whether a response came back.
     expression: business_document = "not_called";
   ↓call_business [steps.SequenceStep-1791380869033]: 
-    comment: Calls the business sequence named by business_sequence (project.sequence) with docid and route. The design-time target demo_business is replaced at runtime by the __project / __sequence step variables.
+    comment: Calls the business sequence named by business_sequence (project.sequence) with docid; it decides how the mail is handled. The design-time target demo_business is replaced at runtime by the __project / __sequence step variables.
     sourceSequence: lib_MailListener.demo_business
     ↓__project [variables.StepVariable-1791380869035]: 
       description: Target project, from the JavaScript scope (read_mail_fields)
@@ -163,8 +161,6 @@ responseTimeout: 3600
       description: Target sequence, from the JavaScript scope (read_mail_fields)
     ↓docid [variables.StepVariable-1791380869039]: 
       description: Mail document id, from the JavaScript scope (mail_route docid)
-    ↓route [variables.StepVariable-1791380869041]: 
-      description: Matched route name, from the JavaScript scope (read_mail_fields)
   ↓src_business_error_message [steps.SimpleSourceStep-1791380882458]: 
     comment: Error raised by the business sequence (exception or XMLErrorStep), null when it succeeded.
     sourceDefinition: 
@@ -198,34 +194,54 @@ responseTimeout: 3600
           - java.lang.String: 
             - ↑value: ./document
     variableName: business_document
+  ↓src_business_decision [steps.JsonSourceStep-1791476247332]: 
+    comment: Decision returned by the business sequence (top-level decision element, with route), null when absent.
+    sourceDefinition: 
+      - xmlizable: 
+        - ↑classname: com.twinsoft.convertigo.beans.common.XMLVector
+        - com.twinsoft.convertigo.beans.common.XMLVector: 
+          - java.lang.String: 
+            - ↑value: 1791380869033
+          - java.lang.String: 
+            - ↑value: ./document/decision
+    variableName: business_decision
 ↓prepare_status [steps.SimpleStep-1791305848732]: 
-  comment: Builds the status update for update_status (error when the business sequence failed).
+  comment: Turns the decision of the business sequence into the status of the processing document (routed, unmatched, error, or pending while the attachment files are being stored).
   expression: |
-    '// Persists the routing decision on the mail document; the merge policy keeps the stored mail fields.
-    // Attachment storage failure, business sequence failure (exception or XMLErrorStep) or a business sequence that
-    // could not be called (unknown project) is not absorbed: the mail becomes status error for mail_replay.
-    var attachmentsError = String(attachments_error || "");
+    '// Persists the decision of the business sequence on the processing document of this listener (merge policy).
+    // decision.route not empty: routed with that route; empty: unmatched (the mail is not for this business sequence).
+    // A failure (exception or XMLErrorStep), a sequence that could not be called (unknown project) or a response without
+    // decision element is not absorbed: status error for mail_replay. While another listener is still storing the
+    // attachment files, the business sequence is not called: status stays pending and attempts unchanged.
     var businessMessage = String(business_error_message || "");
     var businessDetails = String(business_error_details || "");
-    var businessUnreachable = route_var != "" && attachmentsError == "" && typeof business_document != "undefined" && business_document == null;
-    if (attachmentsError != "") {
-      status_var = "error";
-      error_var = ("attachments: " + attachmentsError).substring(0, 2000);
+    var decision = (business_decision != null && typeof business_decision == "object") ? business_decision : null;
+    mail_attempts_after = mail_attempts + 1;
+    route_var = "";
+    if (wait_for_files) {
+      status_var = "pending";
+      error_var = "attachment files of " + docid + " still being stored by another listener: retried later";
+      mail_attempts_after = mail_attempts;
     } else if (businessMessage != "" || businessDetails != "") {
       status_var = "error";
       error_var = (businessMessage + (businessDetails != "" ? " | " + businessDetails : "")).substring(0, 2000);
-    } else if (businessUnreachable) {
+    } else if (business_document == null) {
       status_var = "error";
       error_var = "business sequence " + __project + "." + __sequence + " could not be called (is the project loaded?)";
+    } else if (decision == null) {
+      status_var = "error";
+      error_var = "business sequence " + __project + "." + __sequence + " returned no decision element";
     } else {
+      route_var = String(decision.route == null ? "" : decision.route).trim().substring(0, 100);
+      status_var = route_var != "" ? "routed" : "unmatched";
       error_var = null;
     }
-    _id = String(docid);
+    _id = String(procid);
     _use_json_base = JSON.stringify({
       status: status_var,
       route: route_var,
       routedAt: new Date().toISOString(),
-      attempts: mail_attempts + 1,
+      attempts: mail_attempts_after,
       error: error_var
     });
     status_save_status = "";'
@@ -248,26 +264,27 @@ responseTimeout: 3600
           - ↑value: ./document/couchdb_output/_c8oMeta/statusCode/text()
   variableName: status_save_status
 ↓check_status [steps.SimpleStep-1791305897277]: 
-  comment: Fails the run if the status was not persisted, then builds the summary (docid, sender, shortened subject, route, status, attempts, error).
+  comment: Fails the run if the status was not persisted, then builds the summary (docid, procid, sender, shortened subject, route, status, attempts, error).
   expression: |
     '// CouchDB reports a failed write as a normal response: fail instead of leaving the mail silently pending.
     if (!/^20[12]$/.test(String(status_save_status))) {
-      throw new Error("Status update failed for " + docid + ", HTTP status " + status_save_status);
+      throw new Error("Status update failed for " + procid + ", HTTP status " + status_save_status);
     }
-    // Public summary; the sender and the shortened subject (never the body) let callers report what was routed.
+    // Public summary; the sender and the shortened subject (never the body) let callers report what was handled.
     var summarySubject = (typeof subject_var == "undefined" || subject_var == null) ? "" : String(subject_var).replace(/\s+/g, " ").trim();
     route_summary = {
       docid: String(docid),
+      procid: String(procid),
       from: (typeof from_address_var == "undefined" || from_address_var == null) ? "" : String(from_address_var).toLowerCase(),
       senderVerified: typeof sender_verified_var != "undefined" && String(sender_verified_var) == "true",
       subject: summarySubject.length > 80 ? summarySubject.substring(0, 79) + "…" : summarySubject,
       route: route_var,
       status: status_var,
-      attempts: mail_attempts + 1,
+      attempts: mail_attempts_after,
       error: error_var
     };'
 ↓result [steps.JsonToXmlStep-1791305897283]: 
-  comment: 'Public summary: docid, from, senderVerified, subject (80 characters), route, status, attempts, error.'
+  comment: 'Public summary: docid, procid, from, senderVerified, subject (80 characters), route, status, attempts, error.'
   jsonObject: 
     - xmlizable: 
       - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
@@ -281,7 +298,9 @@ responseTimeout: 3600
         - ↑mode: PLAIN
         - →→: result
 ↓docid [variables.RequestableVariable-1791303045717]: 
-  description: Mail document id (mail-<uid>)
+  description: Mail document id (mail-<key>), passed to the business sequence
 ↓business_sequence [variables.RequestableVariable-1791380868922]: 
-  description: Business sequence called for a matched route, as project.sequence (any loaded project); it receives docid and route
+  description: Business sequence that decides how the mail is handled (project.sequence)
   value: lib_MailListener.demo_business
+↓procid [variables.RequestableVariable-1791477524044]: 
+  description: Processing document of the listener (proc-<listener>-<key>), where the outcome is written

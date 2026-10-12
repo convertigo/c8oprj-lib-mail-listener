@@ -1,17 +1,18 @@
 accessibility: Private
-comment: 'Retention: deletes mail documents (any status) stored more than retention_days ago (lib_maillistener.retention_days, default 30), 200 per run. state-inbox is never touched. Called by mail_poll under its lock; callable alone in Studio.'
+comment: 'Retention: deletes mail and processing documents (any status, any listener) stored more than retention_days ago (lib_maillistener.retention_days, default 30), 200 per run. State documents are never touched. Purges run by other listeners or instances at the same time are tolerated: conflict / not_found answers are counted as conflicts, not failures. Called by mail_poll under its lock; callable alone in Studio.'
 ↓compute_cutoff [steps.SimpleStep-1791376393468]: 
   comment: Builds the cutoff date and the Mango selector for find.
   expression: |
-    '// Retention: mail documents (any status) stored more than retention_days ago are deleted; state-inbox is never
-    // touched. Documents written before storedAt existed fall back to receivedAt. Invalid or non-positive value: 30.
+    '// Retention: mail and processing documents (any status, any listener) stored more than retention_days ago are deleted;
+    // state documents are never touched. Documents written before storedAt existed fall back to receivedAt. Invalid or
+    // non-positive value: 30.
     purge_retention_days = Number(retention_days);
     if (!(purge_retention_days > 0)) {
       purge_retention_days = 30;
     }
     purge_cutoff = new Date(Date.now() - purge_retention_days * 86400000).toISOString();
     _use_selector = JSON.stringify({
-      type: "mail",
+      type: { "$in": ["mail", "processing"] },
       "$or": [
         { storedAt: { "$lt": purge_cutoff } },
         { storedAt: { "$exists": false }, receivedAt: { "$lt": purge_cutoff } }
@@ -38,7 +39,7 @@ comment: 'Retention: deletes mail documents (any status) stored more than retent
   expression: |
     '// Builds the bulk deletion of the expired documents (CouchDB keeps an empty tombstone per deleted document).
     var found = expired || [];
-    purge_stats = { retentionDays: purge_retention_days, cutoff: purge_cutoff, expired: found.length, deleted: 0, failed: 0, hasMore: found.length >= 200, failedIds: [] };
+    purge_stats = { retentionDays: purge_retention_days, cutoff: purge_cutoff, expired: found.length, deleted: 0, conflicts: 0, failed: 0, hasMore: found.length >= 200, failedIds: [] };
     var deletions = [];
     for (var i = 0; i < found.length; i++) {
       deletions.push({ _id: String(found[i]._id), _rev: String(found[i]._rev), _deleted: true });
@@ -65,12 +66,18 @@ comment: 'Retention: deletes mail documents (any status) stored more than retent
             - ↑value: ./document/couchdb_output/items
     variableName: deleted_items
   ↓count [steps.SimpleStep-1791376420183]: 
-    comment: Counts deleted and failed documents.
+    comment: Counts deleted, conflicting (handled by another run) and failed documents.
     expression: |
-      'var results = deleted_items || [];
+      '// Several listeners, possibly on several Convertigo instances, purge the same database: a document deleted or updated
+      // meanwhile by another run answers conflict or not_found. It is not a failure (one still there is deleted by the next
+      // purge).
+      var results = deleted_items || [];
       for (var r = 0; r < results.length; r++) {
+        var outcome = String(results[r].error || "");
         if (String(results[r].ok) == "true") {
           purge_stats.deleted++;
+        } else if (outcome == "conflict" || outcome == "not_found") {
+          purge_stats.conflicts++;
         } else {
           purge_stats.failed++;
           purge_stats.failedIds.push(String(results[r].id));
